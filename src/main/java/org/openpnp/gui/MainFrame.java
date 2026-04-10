@@ -844,6 +844,7 @@ public class MainFrame extends JFrame {
 	        }
 	    }
         splitWindows();
+        org.openpnp.machine.hwgc.deltaproto.DeltaProtoIntegration.install(this);
     }
 
     // 20161222 - ldpgh/lutz_dd
