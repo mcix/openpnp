@@ -27,6 +27,7 @@ import org.openpnp.machine.hwgc.HwgcFeeder;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.Length;
 import org.openpnp.model.LengthUnit;
+import org.openpnp.model.Location;
 import org.openpnp.model.Package;
 import org.openpnp.model.Part;
 import org.openpnp.spi.Feeder;
@@ -61,6 +62,7 @@ public class DeltaProtoFeederImporter {
 
     public static class ImportResult {
         public int packagesCreated;
+        public int baselineFootprintsApplied;
         public int partsCreated;
         public int feedersCreated;
         public int feedersUpdated;
@@ -71,28 +73,47 @@ public class DeltaProtoFeederImporter {
         @Override
         public String toString() {
             return String.format(
-                    "ImportResult{packagesCreated=%d, partsCreated=%d, feedersCreated=%d, feedersUpdated=%d, feedersRemoved=%d, feedersSkipped=%d, warnings=%d}",
-                    packagesCreated, partsCreated, feedersCreated, feedersUpdated,
-                    feedersRemoved, feedersSkipped, warnings.size());
+                    "ImportResult{packagesCreated=%d, baselineFootprints=%d, partsCreated=%d, feedersCreated=%d, feedersUpdated=%d, feedersRemoved=%d, feedersSkipped=%d, warnings=%d}",
+                    packagesCreated, baselineFootprintsApplied, partsCreated, feedersCreated,
+                    feedersUpdated, feedersRemoved, feedersSkipped, warnings.size());
         }
     }
 
     /**
      * Fetches the DeltaProto feeder payload and applies it to the current
      * machine configuration. Persists the configuration on success.
+     *
+     * Must be called on the Swing EDT. OpenPNP config objects are bound to
+     * Swing components via JGoodies BeansBinding, which throws
+     * "Can not call this method on an unbound binding" when bean mutations
+     * are performed off the EDT. Callers that start on a background thread
+     * should fetch the payload first (see {@link #fetch(String)}) and then
+     * invoke {@link #apply(Machine, Payload)} plus
+     * {@link Configuration#save()} from within
+     * {@link javax.swing.SwingUtilities#invokeAndWait}.
      */
     public static ImportResult run(String endpointUrl) throws Exception {
-        Machine machine = Configuration.get().getMachine();
         Payload payload = fetch(endpointUrl);
-        ImportResult result = apply(machine, payload);
+        Machine machine = Configuration.get().getMachine();
+        ImportResult result = apply(machine, payload, FeederLayout.load());
         Configuration.get().save();
         Logger.info("DeltaProto feeder import complete: {}", result);
         return result;
     }
 
-    // ── Core apply logic (package-private for tests) ──
+    /** Package-private accessor so {@link DeltaProtoPanel} can split the fetch
+     *  (background) from the apply (EDT). */
+    static Payload fetchPayload(String endpointUrl) throws Exception {
+        return fetch(endpointUrl);
+    }
+
+    // ── Core apply logic (package-private so DeltaProtoPanel can call it on EDT) ──
 
     static ImportResult apply(Machine machine, Payload payload) throws Exception {
+        return apply(machine, payload, null);
+    }
+
+    static ImportResult apply(Machine machine, Payload payload, FeederLayout layout) throws Exception {
         ImportResult result = new ImportResult();
         Configuration config = Configuration.get();
 
@@ -101,7 +122,9 @@ public class DeltaProtoFeederImporter {
             return result;
         }
 
-        // 1. Packages
+        // 1. Packages — create if missing, and populate a baseline footprint
+        // for known chip sizes (0201/0402/0603/0805) so bottom vision has
+        // something sane to work with on first import.
         if (payload.packages != null) {
             for (PackageDto dto : payload.packages) {
                 if (dto.id == null || dto.id.isBlank()) {
@@ -113,6 +136,9 @@ public class DeltaProtoFeederImporter {
                     pkg.setDescription(dto.description);
                     config.addPackage(pkg);
                     result.packagesCreated++;
+                }
+                if (BaselineFootprints.applyIfKnown(pkg)) {
+                    result.baselineFootprintsApplied++;
                 }
             }
         }
@@ -180,18 +206,26 @@ public class DeltaProtoFeederImporter {
 
                 HwgcFeeder hf = bySlot.get(dto.slotIndex);
                 if (hf == null) {
-                    // Create: feederNumber=slotIndex, empty location (operator
-                    // captures it once via the GUI). Part assignment happens
-                    // immediately so the new feeder is usable after calibration.
+                    // Create: feederNumber=slotIndex. Location is derived from
+                    // the FeederLayout corner configuration when available so
+                    // the operator does not have to touch every new slot.
                     hf = new HwgcFeeder();
                     hf.setFeederNumber(dto.slotIndex);
                     hf.setName("DeltaProto-" + dto.slotIndex);
                     hf.setPart(part);
                     hf.setEnabled(dto.enabled);
+                    if (layout != null) {
+                        Location loc = layout.locationForSlot(dto.slotIndex);
+                        if (loc != null) {
+                            hf.setLocation(loc);
+                        }
+                        else {
+                            result.warnings.add("Slot " + dto.slotIndex
+                                    + " outside configured feeder layout 1..50 — location left blank");
+                        }
+                    }
                     machine.addFeeder(hf);
                     result.feedersCreated++;
-                    result.warnings.add("Created HwgcFeeder for slot " + dto.slotIndex
-                            + " — set its pick location in the GUI");
                 }
                 else {
                     // Update: only the DP-owned fields. Location, tape pitch

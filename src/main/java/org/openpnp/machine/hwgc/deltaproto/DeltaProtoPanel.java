@@ -24,6 +24,9 @@ import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingWorker;
+
+import org.openpnp.model.Configuration;
+import org.openpnp.spi.Machine;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
 
@@ -42,17 +45,32 @@ public class DeltaProtoPanel extends JPanel {
     private final Preferences prefs = Preferences.userNodeForPackage(DeltaProtoPanel.class);
 
     private final JTextField endpointField = new JTextField();
-    private final JTextArea logArea = new JTextArea(12, 60);
+    private final JTextArea logArea = new JTextArea(10, 60);
+
+    // Feeder layout fields — 4 corners × (x, y) + scale
+    private final JTextField flX = new JTextField(8);
+    private final JTextField flY = new JTextField(8);
+    private final JTextField frX = new JTextField(8);
+    private final JTextField frY = new JTextField(8);
+    private final JTextField blX = new JTextField(8);
+    private final JTextField blY = new JTextField(8);
+    private final JTextField brX = new JTextField(8);
+    private final JTextField brY = new JTextField(8);
+    private final JTextField scaleField = new JTextField(6);
 
     public DeltaProtoPanel() {
         super(new BorderLayout(8, 8));
         setBorder(new EmptyBorder(8, 8, 8, 8));
+
+        loadLayoutIntoFields(FeederLayout.load());
 
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
         top.add(buildHeader());
         top.add(Box.createVerticalStrut(8));
         top.add(buildConfigPanel());
+        top.add(Box.createVerticalStrut(4));
+        top.add(buildLayoutPanel());
 
         add(top, BorderLayout.NORTH);
         add(buildActionsPanel(), BorderLayout.CENTER);
@@ -101,6 +119,85 @@ public class DeltaProtoPanel extends JPanel {
         return p;
     }
 
+    private JPanel buildLayoutPanel() {
+        JPanel p = new JPanel(new GridBagLayout());
+        p.setBorder(new TitledBorder("Feeder layout (corner positions)"));
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(2, 4, 2, 4);
+        c.fill = GridBagConstraints.HORIZONTAL;
+
+        // Header row
+        c.gridy = 0;
+        c.gridx = 1; p.add(new JLabel("X", JLabel.CENTER), c);
+        c.gridx = 2; p.add(new JLabel("Y", JLabel.CENTER), c);
+
+        addCornerRow(p, c, 1, "Front-Left  (slot 1)",   flX, flY);
+        addCornerRow(p, c, 2, "Front-Right (slot 25)",  frX, frY);
+        addCornerRow(p, c, 3, "Back-Left   (slot 26)",  blX, blY);
+        addCornerRow(p, c, 4, "Back-Right  (slot 50)",  brX, brY);
+
+        // Scale + save
+        c.gridy = 5;
+        c.gridx = 0; p.add(new JLabel("Scale → mm:"), c);
+        c.gridx = 1; p.add(scaleField, c);
+        c.gridx = 2;
+        JButton saveBtn = new JButton("Save layout");
+        saveBtn.addActionListener(e -> saveLayout());
+        p.add(saveBtn, c);
+
+        return p;
+    }
+
+    private static void addCornerRow(JPanel p, GridBagConstraints c, int row,
+            String label, JTextField xField, JTextField yField) {
+        c.gridy = row;
+        c.gridx = 0; p.add(new JLabel(label), c);
+        c.gridx = 1; p.add(xField, c);
+        c.gridx = 2; p.add(yField, c);
+    }
+
+    private void loadLayoutIntoFields(FeederLayout l) {
+        flX.setText(Double.toString(l.flX));
+        flY.setText(Double.toString(l.flY));
+        frX.setText(Double.toString(l.frX));
+        frY.setText(Double.toString(l.frY));
+        blX.setText(Double.toString(l.blX));
+        blY.setText(Double.toString(l.blY));
+        brX.setText(Double.toString(l.brX));
+        brY.setText(Double.toString(l.brY));
+        scaleField.setText(Double.toString(l.scale));
+    }
+
+    private FeederLayout readLayoutFromFields() {
+        FeederLayout l = new FeederLayout();
+        l.flX = parseDouble(flX.getText(), FeederLayout.DEFAULT_FL_X);
+        l.flY = parseDouble(flY.getText(), FeederLayout.DEFAULT_FL_Y);
+        l.frX = parseDouble(frX.getText(), FeederLayout.DEFAULT_FR_X);
+        l.frY = parseDouble(frY.getText(), FeederLayout.DEFAULT_FR_Y);
+        l.blX = parseDouble(blX.getText(), FeederLayout.DEFAULT_BL_X);
+        l.blY = parseDouble(blY.getText(), FeederLayout.DEFAULT_BL_Y);
+        l.brX = parseDouble(brX.getText(), FeederLayout.DEFAULT_BR_X);
+        l.brY = parseDouble(brY.getText(), FeederLayout.DEFAULT_BR_Y);
+        l.scale = parseDouble(scaleField.getText(), FeederLayout.DEFAULT_SCALE);
+        return l;
+    }
+
+    private static double parseDouble(String s, double fallback) {
+        try {
+            return Double.parseDouble(s.trim());
+        }
+        catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private void saveLayout() {
+        FeederLayout l = readLayoutFromFields();
+        l.save();
+        log("Feeder layout saved.");
+    }
+
     private JPanel buildActionsPanel() {
         JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
         p.setBorder(new TitledBorder("Actions"));
@@ -138,17 +235,25 @@ public class DeltaProtoPanel extends JPanel {
         trigger.setEnabled(false);
         log("Importing feeders from " + url + " …");
 
-        new SwingWorker<DeltaProtoFeederImporter.ImportResult, Void>() {
+        // Fetch on a background thread (HTTP can block), then apply mutations
+        // and save on the EDT — OpenPNP's BeansBinding wiring throws
+        // "Can not call this method on an unbound binding" if bean setters
+        // are invoked off the EDT.
+        new SwingWorker<DeltaProtoFeederImporter.Payload, Void>() {
             @Override
-            protected DeltaProtoFeederImporter.ImportResult doInBackground() throws Exception {
-                return DeltaProtoFeederImporter.run(url);
+            protected DeltaProtoFeederImporter.Payload doInBackground() throws Exception {
+                return DeltaProtoFeederImporter.fetchPayload(url);
             }
 
             @Override
             protected void done() {
                 trigger.setEnabled(true);
                 try {
-                    DeltaProtoFeederImporter.ImportResult r = get();
+                    DeltaProtoFeederImporter.Payload payload = get();
+                    Machine machine = Configuration.get().getMachine();
+                    DeltaProtoFeederImporter.ImportResult r =
+                            DeltaProtoFeederImporter.apply(machine, payload, readLayoutFromFields());
+                    Configuration.get().save();
                     log(r.toString());
                     for (String w : r.warnings) {
                         log("  ! " + w);
