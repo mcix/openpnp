@@ -10,6 +10,7 @@
 package org.openpnp.machine.hwgc.deltaproto;
 
 import org.openpnp.model.Footprint;
+import org.openpnp.model.Length;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Package;
 
@@ -59,6 +60,33 @@ final class BaselineFootprints {
         fp.addPad(pad("2", +padPitch / 2, 0, padW, padH));
         pkg.fireFootprintChanged();
         return true;
+    }
+
+    /**
+     * Returns a nominal body-thickness (Z height) for the given package id,
+     * or {@code null} if no baseline is known. Used by
+     * {@link DeltaProtoFeederImporter} to backfill parts whose
+     * {@code height} was left unset by the backend, so bottom-vision
+     * alignment has a focus target.
+     */
+    static Length defaultPartHeight(String packageId) {
+        if (packageId == null) {
+            return null;
+        }
+        switch (packageId.trim().toUpperCase()) {
+            case "0201":
+                return new Length(0.30, LengthUnit.Millimeters);
+            case "0402":
+                return new Length(0.50, LengthUnit.Millimeters);
+            case "0603":
+                return new Length(0.80, LengthUnit.Millimeters);
+            case "0805":
+                return new Length(1.00, LengthUnit.Millimeters);
+            case "TQFP32":
+                return new Length(1.00, LengthUnit.Millimeters);
+            default:
+                return null;
+        }
     }
 
     private static Footprint.Pad pad(String name, double x, double y, double w, double h) {

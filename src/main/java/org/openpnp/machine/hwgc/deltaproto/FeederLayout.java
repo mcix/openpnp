@@ -27,17 +27,19 @@ class FeederLayout {
     private static final Preferences PREFS =
             Preferences.userNodeForPackage(FeederLayout.class);
 
-    // Default corner coordinates supplied by the operator. Raw machine units
-    // (hundredths of a millimeter at scale=0.01).
-    static final double DEFAULT_FL_X = 2462;
-    static final double DEFAULT_FL_Y = 55198;
-    static final double DEFAULT_FR_X = 40904;
-    static final double DEFAULT_FR_Y = 55169;
-    static final double DEFAULT_BL_X = 2004;
-    static final double DEFAULT_BL_Y = 6039;
-    static final double DEFAULT_BR_X = 40444;
-    static final double DEFAULT_BR_Y = 6024;
-    static final double DEFAULT_SCALE = 0.01;
+    // Default corner coordinates supplied by the operator, in millimeters.
+    // Front row = slots 1..25 = bottom of machine = low Y in OpenPNP coords.
+    // Back row  = slots 26..50 = top of machine  = high Y.
+    // Values measured on the real DeltaProto machine via the down-looking camera.
+    static final double DEFAULT_FL_X = 24.727;
+    static final double DEFAULT_FL_Y = 19.952;
+    static final double DEFAULT_FR_X = 208.781;
+    static final double DEFAULT_FR_Y = 20.283;
+    static final double DEFAULT_BL_X = 20.326;
+    static final double DEFAULT_BL_Y = 511.652;
+    static final double DEFAULT_BR_X = 404.699;
+    static final double DEFAULT_BR_Y = 511.805;
+    static final double DEFAULT_SCALE = 1.0;
 
     static final int FRONT_FIRST = 1;
     static final int FRONT_LAST = 25;

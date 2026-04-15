@@ -155,9 +155,6 @@ public class DeltaProtoFeederImporter {
                     if (dto.name != null) {
                         part.setName(dto.name);
                     }
-                    if (dto.height != null) {
-                        part.setHeight(new Length(dto.height, LengthUnit.Millimeters));
-                    }
                     if (dto.packageId != null) {
                         Package pkg = config.getPackage(dto.packageId);
                         if (pkg == null) {
@@ -170,6 +167,30 @@ public class DeltaProtoFeederImporter {
                     }
                     config.addPart(part);
                     result.partsCreated++;
+                }
+
+                // Resolve height: prefer the DTO value, fall back to a baseline
+                // per package. Applies to new and existing parts whose height
+                // was left unset, so bottom-vision alignment has a valid Z.
+                Length heightFromDto = dto.height != null
+                        ? new Length(dto.height, LengthUnit.Millimeters) : null;
+                if (heightFromDto != null) {
+                    part.setHeight(heightFromDto);
+                }
+                else if (part.isPartHeightUnknown()) {
+                    String pkgId = dto.packageId != null ? dto.packageId
+                            : (part.getPackage() != null ? part.getPackage().getId() : null);
+                    Length baseline = BaselineFootprints.defaultPartHeight(pkgId);
+                    if (baseline != null) {
+                        part.setHeight(baseline);
+                        Logger.info("Part {}: backfilled height from package {} baseline = {}",
+                                dto.id, pkgId, baseline);
+                    }
+                    else {
+                        result.warnings.add("Part " + dto.id
+                                + " has no height and package " + pkgId
+                                + " has no baseline — bottom vision may fail");
+                    }
                 }
             }
         }

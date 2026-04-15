@@ -25,6 +25,7 @@ import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingWorker;
 
+import org.openpnp.machine.hwgc.HwgcDvrCamera;
 import org.openpnp.model.Configuration;
 import org.openpnp.spi.Machine;
 import javax.swing.border.EmptyBorder;
@@ -129,8 +130,10 @@ public class DeltaProtoPanel extends JPanel {
 
         // Header row
         c.gridy = 0;
-        c.gridx = 1; p.add(new JLabel("X", JLabel.CENTER), c);
-        c.gridx = 2; p.add(new JLabel("Y", JLabel.CENTER), c);
+        c.gridx = 1;
+        p.add(new JLabel("X", JLabel.CENTER), c);
+        c.gridx = 2;
+        p.add(new JLabel("Y", JLabel.CENTER), c);
 
         addCornerRow(p, c, 1, "Front-Left  (slot 1)",   flX, flY);
         addCornerRow(p, c, 2, "Front-Right (slot 25)",  frX, frY);
@@ -139,8 +142,10 @@ public class DeltaProtoPanel extends JPanel {
 
         // Scale + save
         c.gridy = 5;
-        c.gridx = 0; p.add(new JLabel("Scale → mm:"), c);
-        c.gridx = 1; p.add(scaleField, c);
+        c.gridx = 0;
+        p.add(new JLabel("Scale → mm:"), c);
+        c.gridx = 1;
+        p.add(scaleField, c);
         c.gridx = 2;
         JButton saveBtn = new JButton("Save layout");
         saveBtn.addActionListener(e -> saveLayout());
@@ -152,9 +157,12 @@ public class DeltaProtoPanel extends JPanel {
     private static void addCornerRow(JPanel p, GridBagConstraints c, int row,
             String label, JTextField xField, JTextField yField) {
         c.gridy = row;
-        c.gridx = 0; p.add(new JLabel(label), c);
-        c.gridx = 1; p.add(xField, c);
-        c.gridx = 2; p.add(yField, c);
+        c.gridx = 0;
+        p.add(new JLabel(label), c);
+        c.gridx = 1;
+        p.add(xField, c);
+        c.gridx = 2;
+        p.add(yField, c);
     }
 
     private void loadLayoutIntoFields(FeederLayout l) {
@@ -206,10 +214,9 @@ public class DeltaProtoPanel extends JPanel {
         importBtn.addActionListener(e -> runImport(importBtn));
         p.add(importBtn);
 
-        // Future DeltaProto actions plug in here:
-        //   p.add(new JButton("Open project …"));
-        //   p.add(new JButton("Close project"));
-        //   p.add(new JButton("Sync BOM"));
+        JButton reopenCamsBtn = new JButton("Reopen cameras");
+        reopenCamsBtn.addActionListener(e -> runReopenCameras(reopenCamsBtn));
+        p.add(reopenCamsBtn);
 
         return p;
     }
@@ -261,6 +268,30 @@ public class DeltaProtoPanel extends JPanel {
                 }
                 catch (Exception ex) {
                     log("Import failed: " + ex.getMessage());
+                }
+            }
+        }.execute();
+    }
+
+    private void runReopenCameras(JButton trigger) {
+        trigger.setEnabled(false);
+        log("Reopening HWGC DVR cameras …");
+        new SwingWorker<Void, Void>() {
+            @Override
+            protected Void doInBackground() throws Exception {
+                HwgcDvrCamera.reopenAll();
+                return null;
+            }
+
+            @Override
+            protected void done() {
+                trigger.setEnabled(true);
+                try {
+                    get();
+                    log("Cameras reopened.");
+                }
+                catch (Exception ex) {
+                    log("Reopen failed: " + ex.getMessage());
                 }
             }
         }.execute();
