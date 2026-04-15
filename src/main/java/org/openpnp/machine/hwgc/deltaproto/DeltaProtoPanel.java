@@ -13,23 +13,45 @@ import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.prefs.Preferences;
+import javax.swing.Timer;
 
 import javax.swing.Box;
 import javax.swing.BoxLayout;
+import javax.swing.ComboBoxEditor;
+import javax.swing.DefaultComboBoxModel;
 import javax.swing.JButton;
+import javax.swing.JComboBox;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
+import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+import javax.swing.text.JTextComponent;
 
+import org.openpnp.gui.MainFrame;
 import org.openpnp.machine.hwgc.HwgcDvrCamera;
 import org.openpnp.model.Configuration;
+import org.openpnp.model.Job;
 import org.openpnp.spi.Machine;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
+
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 
 /**
  * Single controlled entry point from DeltaProto into OpenPNP. Currently
@@ -40,13 +62,24 @@ import javax.swing.border.TitledBorder;
 public class DeltaProtoPanel extends JPanel {
 
     private static final String PREF_KEY_ENDPOINT = "deltaproto.feederEndpoint";
+    private static final String PREF_KEY_JOB_ENDPOINT = "deltaproto.jobEndpoint";
     private static final String DEFAULT_ENDPOINT =
-            "http://localhost:8080/api/openpnp/feeders";
+            "https://deltaproto.com/api/openpnp/feeders?machine=Buddy%202";
+    private static final String DEFAULT_JOB_ENDPOINT =
+            "https://deltaproto.com/api/openpnp/jobs";
+    private static final String DEFAULT_PROJECT_SEARCH_ENDPOINT =
+            "https://deltaproto.com/api/openpnp/projectorders";
 
     private final Preferences prefs = Preferences.userNodeForPackage(DeltaProtoPanel.class);
 
     private final JTextField endpointField = new JTextField();
     private final JTextArea logArea = new JTextArea(10, 60);
+
+    // Job-import UI
+    private final DefaultComboBoxModel<ProjectOrderItem> projectModel = new DefaultComboBoxModel<>();
+    private final JComboBox<ProjectOrderItem> projectCombo = new JComboBox<>(projectModel);
+    private final Timer searchDebounce = new Timer(250, e -> runProjectSearch());
+    private SwingWorker<List<ProjectOrderItem>, Void> activeSearchWorker;
 
     // Feeder layout fields — 4 corners × (x, y) + scale
     private final JTextField flX = new JTextField(8);
@@ -72,10 +105,16 @@ public class DeltaProtoPanel extends JPanel {
         top.add(buildConfigPanel());
         top.add(Box.createVerticalStrut(4));
         top.add(buildLayoutPanel());
+        top.add(Box.createVerticalStrut(4));
+        top.add(buildJobPanel());
 
         add(top, BorderLayout.NORTH);
         add(buildActionsPanel(), BorderLayout.CENTER);
         add(buildLogPanel(), BorderLayout.SOUTH);
+
+        // Initial fetch so the dropdown isn't empty before the user types.
+        searchDebounce.setRepeats(false);
+        runProjectSearch();
     }
 
     // ── UI construction ──
@@ -206,6 +245,45 @@ public class DeltaProtoPanel extends JPanel {
         log("Feeder layout saved.");
     }
 
+    private JPanel buildJobPanel() {
+        JPanel p = new JPanel(new GridBagLayout());
+        p.setBorder(new TitledBorder("Job import"));
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(2, 4, 2, 4);
+        c.gridy = 0;
+        c.fill = GridBagConstraints.HORIZONTAL;
+
+        c.gridx = 0;
+        c.weightx = 0;
+        p.add(new JLabel("Project order:"), c);
+
+        c.gridx = 1;
+        c.weightx = 1;
+        projectCombo.setEditable(true);
+        // The combo box is editable so the user can type to filter; the typed
+        // text drives the debounced search against /api/openpnp/projectorders.
+        ComboBoxEditor editor = projectCombo.getEditor();
+        if (editor.getEditorComponent() instanceof JTextComponent) {
+            JTextComponent tc = (JTextComponent) editor.getEditorComponent();
+            tc.getDocument().addDocumentListener(new DocumentListener() {
+                @Override public void insertUpdate(DocumentEvent e) { searchDebounce.restart(); }
+                @Override public void removeUpdate(DocumentEvent e) { searchDebounce.restart(); }
+                @Override public void changedUpdate(DocumentEvent e) { searchDebounce.restart(); }
+            });
+        }
+        p.add(projectCombo, c);
+
+        c.gridx = 2;
+        c.weightx = 0;
+        c.fill = GridBagConstraints.NONE;
+        JButton importBtn = new JButton("Import job");
+        importBtn.addActionListener(e -> runJobImport(importBtn));
+        p.add(importBtn, c);
+
+        return p;
+    }
+
     private JPanel buildActionsPanel() {
         JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
         p.setBorder(new TitledBorder("Actions"));
@@ -295,6 +373,162 @@ public class DeltaProtoPanel extends JPanel {
                 }
             }
         }.execute();
+    }
+
+    // ── Job import actions ──
+
+    private String currentSearchText() {
+        Object editorItem = projectCombo.getEditor().getItem();
+        if (editorItem == null) {
+            return "";
+        }
+        if (editorItem instanceof ProjectOrderItem) {
+            return ((ProjectOrderItem) editorItem).displayName;
+        }
+        return editorItem.toString();
+    }
+
+    private void runProjectSearch() {
+        // Don't fire a search for selections we made ourselves; only when the
+        // user is clearly typing free text. We treat any text shorter than the
+        // current selection's displayName as filter input.
+        String text = currentSearchText();
+        Object selected = projectCombo.getSelectedItem();
+        if (selected instanceof ProjectOrderItem
+                && text.equals(((ProjectOrderItem) selected).displayName)) {
+            return;
+        }
+        if (activeSearchWorker != null && !activeSearchWorker.isDone()) {
+            activeSearchWorker.cancel(true);
+        }
+        activeSearchWorker = new SwingWorker<List<ProjectOrderItem>, Void>() {
+            @Override
+            protected List<ProjectOrderItem> doInBackground() throws Exception {
+                return searchProjectOrders(text);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    List<ProjectOrderItem> results = get();
+                    String preserved = currentSearchText();
+                    projectModel.removeAllElements();
+                    for (ProjectOrderItem item : results) {
+                        projectModel.addElement(item);
+                    }
+                    // Keep the user's typing in the editor — replacing the
+                    // model resets the editor to the first item otherwise.
+                    projectCombo.setSelectedItem(null);
+                    projectCombo.getEditor().setItem(preserved);
+                    if (projectCombo.isPopupVisible() == false && results.size() > 0) {
+                        projectCombo.showPopup();
+                    }
+                }
+                catch (Exception ex) {
+                    // Cancellation is expected when the user keeps typing —
+                    // don't pollute the log.
+                    if (!(ex instanceof java.util.concurrent.CancellationException)) {
+                        log("Project search failed: " + ex.getMessage());
+                    }
+                }
+            }
+        };
+        activeSearchWorker.execute();
+    }
+
+    private List<ProjectOrderItem> searchProjectOrders(String query) throws Exception {
+        String base = prefs.get("deltaproto.projectSearchEndpoint", DEFAULT_PROJECT_SEARCH_ENDPOINT);
+        String url = base
+                + (base.contains("?") ? "&" : "?")
+                + "q=" + URLEncoder.encode(query == null ? "" : query, StandardCharsets.UTF_8);
+
+        HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(15))
+                .header("Accept", "application/json")
+                .GET()
+                .build();
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() / 100 != 2) {
+            throw new RuntimeException("HTTP " + response.statusCode() + ": " + response.body());
+        }
+        List<ProjectOrderItem> items = new Gson().fromJson(response.body(),
+                new TypeToken<List<ProjectOrderItem>>() {}.getType());
+        return items != null ? items : new ArrayList<>();
+    }
+
+    private void runJobImport(JButton trigger) {
+        // Resolve the project order id: prefer a structured selection, fall
+        // back to the raw text the user typed.
+        String projectOrderId;
+        Object selected = projectCombo.getSelectedItem();
+        if (selected instanceof ProjectOrderItem) {
+            ProjectOrderItem item = (ProjectOrderItem) selected;
+            projectOrderId = item.internalName != null && !item.internalName.isEmpty()
+                    ? item.internalName : item.name;
+        }
+        else {
+            projectOrderId = currentSearchText();
+        }
+        if (projectOrderId == null || projectOrderId.isBlank()) {
+            log("No project order selected.");
+            return;
+        }
+
+        String base = prefs.get(PREF_KEY_JOB_ENDPOINT, DEFAULT_JOB_ENDPOINT);
+        String url = DeltaProtoJobImporter.buildJobUrl(base, projectOrderId.trim());
+
+        trigger.setEnabled(false);
+        log("Importing job " + projectOrderId + " from " + url + " …");
+
+        new SwingWorker<DeltaProtoJobImporter.Payload, Void>() {
+            @Override
+            protected DeltaProtoJobImporter.Payload doInBackground() throws Exception {
+                return DeltaProtoJobImporter.fetchPayload(url);
+            }
+
+            @Override
+            protected void done() {
+                trigger.setEnabled(true);
+                try {
+                    DeltaProtoJobImporter.Payload payload = get();
+                    DeltaProtoJobImporter.JobBuildResult built =
+                            DeltaProtoJobImporter.buildJob(payload);
+                    if (built.job == null) {
+                        log("Job import failed: empty payload");
+                        return;
+                    }
+                    Configuration.get().save();
+                    MainFrame.get().getJobTab().setJob(built.job);
+                    log(built.result.toString());
+                    for (String w : built.result.warnings) {
+                        log("  ! " + w);
+                    }
+                }
+                catch (Exception ex) {
+                    log("Job import failed: " + ex.getMessage());
+                }
+            }
+        }.execute();
+    }
+
+    /** DTO matching {@code OpenPnPController.ProjectOrderSummaryDao}. Public
+     *  so Gson can deserialise it through reflection. */
+    public static class ProjectOrderItem {
+        public String id;
+        public String internalName;
+        public String name;
+        public String displayName;
+
+        @Override
+        public String toString() {
+            return displayName != null ? displayName
+                    : (internalName != null ? internalName
+                    : (name != null ? name : ""));
+        }
     }
 
     private void log(String line) {
