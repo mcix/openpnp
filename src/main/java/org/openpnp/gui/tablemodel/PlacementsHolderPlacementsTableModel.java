@@ -220,9 +220,15 @@ public class PlacementsHolderPlacementsTableModel extends AbstractObjectTableMod
             }
             return index;
         }
-        else {
+        else if (placements != null) {
             return placements.indexOf(object);
         }
+        // Model holds no data yet — happens when a global PlacementSelectedEvent
+        // is dispatched to a panel whose model has not been populated (e.g.
+        // BoardPlacementsPanel before any board has been opened in the board
+        // editor). Returning -1 is the same "not found" semantics as a populated
+        // list that doesn't contain the object.
+        return -1;
     }
 
     @Override

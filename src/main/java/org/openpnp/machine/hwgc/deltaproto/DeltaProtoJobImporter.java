@@ -19,6 +19,7 @@
  */
 package org.openpnp.machine.hwgc.deltaproto;
 
+import java.io.File;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -40,6 +41,7 @@ import org.openpnp.model.Location;
 import org.openpnp.model.Package;
 import org.openpnp.model.Part;
 import org.openpnp.model.Placement;
+import org.openpnp.spi.Feeder;
 import org.pmw.tinylog.Logger;
 
 import com.google.gson.Gson;
@@ -173,12 +175,34 @@ public class DeltaProtoJobImporter {
             }
         }
 
-        // 3. Build the Board + placements. We always emit a single Board
-        // wrapped in a single BoardLocation under the Job's rootPanel — no
-        // multi-up panelisation, that's a deliberate scope limit.
-        Board board = new Board();
+        // 3. Build the Board + placements. The board is persisted to a stable
+        // file under <openpnp config dir>/boards/ so that:
+        //   (a) it goes through Configuration.getBoard(file), which registers
+        //       it in the canonical boards map — the same path normal jobs
+        //       take. Skipping this leaves the board half-initialised and
+        //       breaks any panel that listens for board/placement events.
+        //   (b) the Job that wraps it can be saved as a real .job.xml later
+        //       because the BoardLocation has a real fileName.
+        // We always emit a single Board wrapped in a single BoardLocation
+        // under the Job's rootPanel — no multi-up panelisation.
         String boardName = payload.board != null && payload.board.name != null
                 ? payload.board.name : payload.projectOrder;
+        Board board;
+        try {
+            File boardFile = boardFileFor(payload.projectOrder);
+            board = config.getBoard(boardFile);
+        }
+        catch (Exception e) {
+            result.warnings.add("Failed to open board file: " + e.getMessage());
+            return new JobBuildResult(null, result);
+        }
+
+        // Wipe any placements left over from a previous import for the same
+        // project order — we do not merge, the backend is the source of truth.
+        for (Placement old : new ArrayList<>(board.getPlacements())) {
+            board.removePlacement(old);
+        }
+
         board.setName(boardName);
         if (payload.board != null && payload.board.width != null && payload.board.height != null) {
             board.setDimensions(new Location(LengthUnit.Millimeters,
@@ -223,14 +247,75 @@ public class DeltaProtoJobImporter {
             }
         }
 
-        Job job = new Job();
+        // Persist the new placements to the .board.xml — same step that
+        // happens when the operator edits a board in the board tab.
+        try {
+            config.saveBoard(board);
+        }
+        catch (Exception e) {
+            result.warnings.add("Failed to save board file: " + e.getMessage());
+        }
+
+        // Diagnostic: count how many enabled placements have a matching
+        // enabled Feeder on the current machine. The job placements table
+        // shows "Missing Feeder" using reference equality between
+        // feeder.getPart() and placement.getPart(); both should resolve via
+        // Configuration.getPart(id) to the same instance, so a mismatch here
+        // means either the feeder importer hasn't been run for these MPNs or
+        // the corresponding BuddyParts are not currently loaded.
+        int placementsWithFeeder = 0;
+        java.util.Set<String> missingPartIds = new java.util.LinkedHashSet<>();
+        try {
+            List<Feeder> feeders = config.getMachine().getFeeders();
+            for (Placement placement : board.getPlacements()) {
+                if (!placement.isEnabled() || placement.getPart() == null) {
+                    continue;
+                }
+                boolean found = false;
+                for (Feeder feeder : feeders) {
+                    if (feeder.isEnabled() && feeder.getPart() == placement.getPart()) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (found) {
+                    placementsWithFeeder++;
+                }
+                else {
+                    missingPartIds.add(placement.getPart().getId());
+                }
+            }
+        }
+        catch (Exception e) {
+            // Machine not available — skip diagnostic, not fatal for import.
+        }
+        if (!missingPartIds.isEmpty()) {
+            result.warnings.add(placementsWithFeeder + "/" + result.placementsEnabled
+                    + " enabled placements have a matching enabled feeder. "
+                    + "Missing feeder for parts: " + missingPartIds);
+        }
+
         BoardLocation boardLocation = new BoardLocation(board);
         boardLocation.setLocation(new Location(LengthUnit.Millimeters, 0.0, 0.0, 0.0, 0.0));
         boardLocation.setSide(Side.Top);
+
+        Job job = new Job();
         job.addBoardOrPanelLocation(boardLocation);
 
         Logger.info("DeltaProto job import built: {}", result);
         return new JobBuildResult(job, result);
+    }
+
+    /** Stable on-disk location for a project order's generated board file.
+     *  Names are sanitised so spaces and slashes become underscores. */
+    private static File boardFileFor(String projectOrder) {
+        String safe = (projectOrder == null ? "unnamed" : projectOrder)
+                .replaceAll("[^A-Za-z0-9._-]+", "_");
+        File dir = new File(Configuration.get().getConfigurationDirectory(), "boards");
+        if (!dir.exists()) {
+            dir.mkdirs();
+        }
+        return new File(dir, "DeltaProto-" + safe + ".board.xml");
     }
 
     /** Returned from {@link #buildJob(Payload)} so the caller gets both the
