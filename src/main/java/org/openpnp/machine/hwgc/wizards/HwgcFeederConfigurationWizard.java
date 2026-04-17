@@ -25,6 +25,7 @@ import java.awt.event.ActionEvent;
 import javax.swing.AbstractAction;
 import javax.swing.Action;
 import javax.swing.JButton;
+import javax.swing.JDialog;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JTextField;
@@ -35,12 +36,17 @@ import org.openpnp.gui.MainFrame;
 import org.openpnp.gui.components.ComponentDecorators;
 import org.openpnp.gui.components.LocationButtonsPanel;
 import org.openpnp.gui.support.AbstractConfigurationWizard;
+import org.openpnp.gui.support.DoubleConverter;
 import org.openpnp.gui.support.IntegerConverter;
 import org.openpnp.gui.support.LengthConverter;
 import org.openpnp.gui.support.MutableLocationProxy;
 import org.openpnp.machine.hwgc.HwgcFeeder;
+import org.openpnp.model.Configuration;
 import org.openpnp.spi.Camera;
 import org.openpnp.util.UiUtils;
+import org.openpnp.vision.pipeline.CvPipeline;
+import org.openpnp.vision.pipeline.ui.CvPipelineEditor;
+import org.openpnp.vision.pipeline.ui.CvPipelineEditorDialog;
 
 import com.jgoodies.forms.layout.ColumnSpec;
 import com.jgoodies.forms.layout.FormLayout;
@@ -65,12 +71,17 @@ public class HwgcFeederConfigurationWizard extends AbstractConfigurationWizard {
     private JTextField holeDiameterField;
     private JTextField holeSearchField;
 
+    private JTextField tapeWidthField;
+    private JTextField diameterToleranceField;
+    private JTextField pitchToleranceField;
+
     public HwgcFeederConfigurationWizard(HwgcFeeder feeder) {
         this.feeder = feeder;
 
         contentPanel.add(buildSettingsPanel());
         contentPanel.add(buildLocationPanel());
         contentPanel.add(buildVisionPanel());
+        contentPanel.add(buildTapeCalibrationPanel());
     }
 
     private JPanel buildSettingsPanel() {
@@ -163,7 +174,7 @@ public class HwgcFeederConfigurationWizard extends AbstractConfigurationWizard {
                         FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
                         FormSpecs.RELATED_GAP_ROWSPEC, }));
 
-        panel.add(new JLabel("Hole → Part Offset X / Y"), "2, 2, right, default");
+        panel.add(new JLabel("Hole \u2192 Part Offset X / Y"), "2, 2, right, default");
         offsetX = new JTextField(8);
         panel.add(offsetX, "4, 2, fill, default");
         offsetY = new JTextField(8);
@@ -179,6 +190,53 @@ public class HwgcFeederConfigurationWizard extends AbstractConfigurationWizard {
         panel.add(captureBtn, "2, 6");
         JButton calibrateBtn = new JButton(calibrateFromCameraAction);
         panel.add(calibrateBtn, "4, 6");
+
+        return panel;
+    }
+
+    private JPanel buildTapeCalibrationPanel() {
+        JPanel panel = new JPanel();
+        panel.setBorder(new TitledBorder(null,
+                "EIA-481 Tape Calibration", TitledBorder.LEADING, TitledBorder.TOP,
+                null, new Color(0, 0, 0)));
+        panel.setLayout(new FormLayout(
+                new ColumnSpec[] {
+                        FormSpecs.RELATED_GAP_COLSPEC,
+                        FormSpecs.DEFAULT_COLSPEC,
+                        FormSpecs.RELATED_GAP_COLSPEC,
+                        FormSpecs.DEFAULT_COLSPEC,
+                        FormSpecs.RELATED_GAP_COLSPEC,
+                        FormSpecs.DEFAULT_COLSPEC,
+                        FormSpecs.RELATED_GAP_COLSPEC, },
+                new RowSpec[] {
+                        FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
+                        FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
+                        FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
+                        FormSpecs.RELATED_GAP_ROWSPEC, FormSpecs.DEFAULT_ROWSPEC,
+                        FormSpecs.RELATED_GAP_ROWSPEC, }));
+
+        panel.add(new JLabel("Tape Width"), "2, 2, right, default");
+        tapeWidthField = new JTextField(8);
+        panel.add(tapeWidthField, "4, 2, fill, default");
+        panel.add(new JLabel("(8, 12, 16, 24 mm)"), "6, 2");
+
+        panel.add(new JLabel("Diameter Tolerance"), "2, 4, right, default");
+        diameterToleranceField = new JTextField(8);
+        panel.add(diameterToleranceField, "4, 4, fill, default");
+        panel.add(new JLabel("(0.0 – 1.0, e.g. 0.5 = \u00b150%)"), "6, 4");
+
+        panel.add(new JLabel("Pitch Tolerance"), "2, 6, right, default");
+        pitchToleranceField = new JTextField(8);
+        panel.add(pitchToleranceField, "4, 6, fill, default");
+        panel.add(new JLabel("(holes must be N\u00d74mm \u00b1 this)"), "6, 6");
+
+        JButton calibrateBtn = new JButton(calibrateFromTapeAction);
+        panel.add(calibrateBtn, "2, 8");
+
+        JButton editPipelineBtn = new JButton(editPipelineAction);
+        panel.add(editPipelineBtn, "4, 8");
+        JButton resetPipelineBtn = new JButton(resetPipelineAction);
+        panel.add(resetPipelineBtn, "6, 8");
 
         return panel;
     }
@@ -204,6 +262,10 @@ public class HwgcFeederConfigurationWizard extends AbstractConfigurationWizard {
 
         addWrappedBinding(feeder, "holeDiameter", holeDiameterField, "text", lengthConverter);
         addWrappedBinding(feeder, "holeSearchDistance", holeSearchField, "text", lengthConverter);
+        addWrappedBinding(feeder, "tapeWidth", tapeWidthField, "text", lengthConverter);
+        addWrappedBinding(feeder, "holeDiameterTolerance", diameterToleranceField, "text",
+                new DoubleConverter(Configuration.get().getLengthDisplayFormat()));
+        addWrappedBinding(feeder, "holePitchTolerance", pitchToleranceField, "text", lengthConverter);
 
         ComponentDecorators.decorateWithAutoSelect(feederNumberField);
         ComponentDecorators.decorateWithAutoSelect(feedDurationField);
@@ -214,6 +276,9 @@ public class HwgcFeederConfigurationWizard extends AbstractConfigurationWizard {
         ComponentDecorators.decorateWithAutoSelectAndLengthConversion(offsetY);
         ComponentDecorators.decorateWithAutoSelectAndLengthConversion(holeDiameterField);
         ComponentDecorators.decorateWithAutoSelectAndLengthConversion(holeSearchField);
+        ComponentDecorators.decorateWithAutoSelectAndLengthConversion(tapeWidthField);
+        ComponentDecorators.decorateWithAutoSelect(diameterToleranceField);
+        ComponentDecorators.decorateWithAutoSelectAndLengthConversion(pitchToleranceField);
     }
 
     private final Action openFeederAction = new AbstractAction("Open") {
@@ -253,6 +318,42 @@ public class HwgcFeederConfigurationWizard extends AbstractConfigurationWizard {
                         .getHead().getDefaultCamera();
                 feeder.calibrateLocation(camera);
             });
+        }
+    };
+
+    private final Action calibrateFromTapeAction = new AbstractAction("Calibrate from Tape") {
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            applyAction.actionPerformed(e);
+            UiUtils.submitUiMachineTask(() -> {
+                Camera camera = MainFrame.get().getMachineControls().getSelectedTool()
+                        .getHead().getDefaultCamera();
+                feeder.calibrateFromTape(camera);
+            });
+        }
+    };
+
+    private final Action editPipelineAction = new AbstractAction("Edit Pipeline") {
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            UiUtils.messageBoxOnException(() -> {
+                Camera camera = Configuration.get().getMachine()
+                        .getDefaultHead().getDefaultCamera();
+                CvPipeline pipeline = HwgcFeeder.getPipeline();
+                pipeline.setProperty("camera", camera);
+                pipeline.setProperty("feeder", feeder);
+                CvPipelineEditor editor = new CvPipelineEditor(pipeline);
+                JDialog dialog = new CvPipelineEditorDialog(
+                        MainFrame.get(), "HwgcFeeder Shared Pipeline", editor);
+                dialog.setVisible(true);
+            });
+        }
+    };
+
+    private final Action resetPipelineAction = new AbstractAction("Reset Pipeline") {
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            HwgcFeeder.resetPipeline();
         }
     };
 }

@@ -42,6 +42,7 @@ import org.openpnp.model.Package;
 import org.openpnp.model.Part;
 import org.openpnp.model.Placement;
 import org.openpnp.spi.Feeder;
+import org.openpnp.spi.Machine;
 import org.pmw.tinylog.Logger;
 
 import com.google.gson.Gson;
@@ -117,9 +118,9 @@ public class DeltaProtoJobImporter {
 
         Configuration config = Configuration.get();
 
-        // 1. Packages — create on demand. Description is intentionally left
-        // null when unknown so we don't overwrite better data the operator
-        // might have entered manually.
+        // 1. Packages — create on demand, apply baseline footprint and
+        // nozzle tip assignment for known chip sizes.
+        Machine machine = config.getMachine();
         if (payload.packages != null) {
             for (PackageDto dto : payload.packages) {
                 if (dto.id == null || dto.id.isBlank()) {
@@ -135,14 +136,24 @@ public class DeltaProtoJobImporter {
                     result.packagesCreated++;
                 }
                 if (BaselineFootprints.applyIfKnown(pkg)) {
-                    // Same baseline application as feeder importer; keeps
-                    // bottom vision sane on first import.
+                    // Baseline footprint applied for bottom vision.
+                }
+                String ntName = BaselineFootprints.recommendedNozzleTip(dto.id);
+                if (ntName != null && pkg.getCompatibleNozzleTips().isEmpty()) {
+                    String[] names = ntName.equals("503")
+                            ? new String[]{"503", "503-2"} : new String[]{ntName};
+                    for (String name : names) {
+                        org.openpnp.spi.NozzleTip nt = machine.getNozzleTipByName(name);
+                        if (nt != null) {
+                            pkg.addCompatibleNozzleTip(nt);
+                        }
+                    }
                 }
             }
         }
 
-        // 2. Parts — create on demand and backfill height. Skipped warnings
-        // are surfaced in the result so the operator can correct upstream.
+        // 2. Parts — create on demand, always update package to match
+        // the backend, and backfill height.
         if (payload.parts != null) {
             for (PartDto dto : payload.parts) {
                 if (dto.id == null || dto.id.isBlank()) {
@@ -154,18 +165,18 @@ public class DeltaProtoJobImporter {
                     if (dto.name != null) {
                         part.setName(dto.name);
                     }
-                    if (dto.packageId != null) {
-                        Package pkg = config.getPackage(dto.packageId);
-                        if (pkg == null) {
-                            result.warnings.add("Part " + dto.id + " references unknown package "
-                                    + dto.packageId);
-                        }
-                        else {
-                            part.setPackage(pkg);
-                        }
-                    }
                     config.addPart(part);
                     result.partsCreated++;
+                }
+                if (dto.packageId != null) {
+                    Package pkg = config.getPackage(dto.packageId);
+                    if (pkg == null) {
+                        result.warnings.add("Part " + dto.id + " references unknown package "
+                                + dto.packageId);
+                    }
+                    else {
+                        part.setPackage(pkg);
+                    }
                 }
                 Length heightFromDto = dto.height != null
                         ? new Length(dto.height, LengthUnit.Millimeters) : null;

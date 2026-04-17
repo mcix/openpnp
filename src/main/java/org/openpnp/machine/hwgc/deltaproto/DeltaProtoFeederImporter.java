@@ -63,6 +63,7 @@ public class DeltaProtoFeederImporter {
     public static class ImportResult {
         public int packagesCreated;
         public int baselineFootprintsApplied;
+        public int nozzleTipsAssigned;
         public int partsCreated;
         public int feedersCreated;
         public int feedersUpdated;
@@ -73,9 +74,9 @@ public class DeltaProtoFeederImporter {
         @Override
         public String toString() {
             return String.format(
-                    "ImportResult{packagesCreated=%d, baselineFootprints=%d, partsCreated=%d, feedersCreated=%d, feedersUpdated=%d, feedersRemoved=%d, feedersSkipped=%d, warnings=%d}",
-                    packagesCreated, baselineFootprintsApplied, partsCreated, feedersCreated,
-                    feedersUpdated, feedersRemoved, feedersSkipped, warnings.size());
+                    "ImportResult{packagesCreated=%d, baselineFootprints=%d, nozzleTips=%d, partsCreated=%d, feedersCreated=%d, feedersUpdated=%d, feedersRemoved=%d, feedersSkipped=%d, warnings=%d}",
+                    packagesCreated, baselineFootprintsApplied, nozzleTipsAssigned, partsCreated,
+                    feedersCreated, feedersUpdated, feedersRemoved, feedersSkipped, warnings.size());
         }
     }
 
@@ -122,9 +123,8 @@ public class DeltaProtoFeederImporter {
             return result;
         }
 
-        // 1. Packages — create if missing, and populate a baseline footprint
-        // for known chip sizes (0201/0402/0603/0805) so bottom vision has
-        // something sane to work with on first import.
+        // 1. Packages — create if missing, populate a baseline footprint
+        // for known chip sizes, and assign the recommended JUKI nozzle tip.
         if (payload.packages != null) {
             for (PackageDto dto : payload.packages) {
                 if (dto.id == null || dto.id.isBlank()) {
@@ -140,10 +140,25 @@ public class DeltaProtoFeederImporter {
                 if (BaselineFootprints.applyIfKnown(pkg)) {
                     result.baselineFootprintsApplied++;
                 }
+                // Assign nozzle tip(s) if not already set.
+                String ntName = BaselineFootprints.recommendedNozzleTip(dto.id);
+                if (ntName != null && pkg.getCompatibleNozzleTips().isEmpty()) {
+                    // For 503, also assign the second 503-2 nozzle tip.
+                    String[] names = ntName.equals("503")
+                            ? new String[]{"503", "503-2"} : new String[]{ntName};
+                    for (String name : names) {
+                        org.openpnp.spi.NozzleTip nt = machine.getNozzleTipByName(name);
+                        if (nt != null) {
+                            pkg.addCompatibleNozzleTip(nt);
+                            result.nozzleTipsAssigned++;
+                        }
+                    }
+                }
             }
         }
 
-        // 2. Parts
+        // 2. Parts — create if missing, always update package to match
+        // the backend (so R0402/C0402 overrides a stale bare "0402").
         if (payload.parts != null) {
             for (PartDto dto : payload.parts) {
                 if (dto.id == null || dto.id.isBlank()) {
@@ -155,18 +170,21 @@ public class DeltaProtoFeederImporter {
                     if (dto.name != null) {
                         part.setName(dto.name);
                     }
-                    if (dto.packageId != null) {
-                        Package pkg = config.getPackage(dto.packageId);
-                        if (pkg == null) {
-                            result.warnings.add("Part " + dto.id + " references unknown package "
-                                    + dto.packageId);
-                        }
-                        else {
-                            part.setPackage(pkg);
-                        }
-                    }
                     config.addPart(part);
                     result.partsCreated++;
+                }
+                // Always (re-)apply the package from the backend so that
+                // stale assignments (e.g. bare "0402") get corrected to
+                // the prefixed form (e.g. "R0402" / "C0402").
+                if (dto.packageId != null) {
+                    Package pkg = config.getPackage(dto.packageId);
+                    if (pkg == null) {
+                        result.warnings.add("Part " + dto.id + " references unknown package "
+                                + dto.packageId);
+                    }
+                    else {
+                        part.setPackage(pkg);
+                    }
                 }
 
                 // Resolve height: prefer the DTO value, fall back to a baseline
@@ -227,33 +245,35 @@ public class DeltaProtoFeederImporter {
 
                 HwgcFeeder hf = bySlot.get(dto.slotIndex);
                 if (hf == null) {
-                    // Create: feederNumber=slotIndex. Location is derived from
-                    // the FeederLayout corner configuration when available so
-                    // the operator does not have to touch every new slot.
                     hf = new HwgcFeeder();
                     hf.setFeederNumber(dto.slotIndex);
                     hf.setName("DeltaProto-" + dto.slotIndex);
                     hf.setPart(part);
                     hf.setEnabled(dto.enabled);
-                    if (layout != null) {
-                        Location loc = layout.locationForSlot(dto.slotIndex);
-                        if (loc != null) {
-                            hf.setLocation(loc);
-                        }
-                        else {
-                            result.warnings.add("Slot " + dto.slotIndex
-                                    + " outside configured feeder layout 1..50 — location left blank");
-                        }
-                    }
                     machine.addFeeder(hf);
                     result.feedersCreated++;
                 }
                 else {
-                    // Update: only the DP-owned fields. Location, tape pitch
-                    // and feed duration stay as the operator configured them.
                     hf.setPart(part);
                     hf.setEnabled(dto.enabled);
                     result.feedersUpdated++;
+                }
+
+                // Always (re)apply the layout-derived pick location so that
+                // tweaks to the DeltaProto panel layout propagate to every
+                // existing feeder on the next import — including slots whose
+                // position did not change, so drift can be corrected with a
+                // single click. Operator-taught overrides must be made after
+                // import.
+                if (layout != null) {
+                    Location loc = layout.locationForSlot(dto.slotIndex);
+                    if (loc != null) {
+                        hf.setLocation(loc);
+                    }
+                    else {
+                        result.warnings.add("Slot " + dto.slotIndex
+                                + " outside configured feeder layout 1..50 — location not updated");
+                    }
                 }
             }
         }

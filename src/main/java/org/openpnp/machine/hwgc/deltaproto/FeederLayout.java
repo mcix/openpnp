@@ -40,6 +40,8 @@ class FeederLayout {
     static final double DEFAULT_BR_X = 404.699;
     static final double DEFAULT_BR_Y = 511.805;
     static final double DEFAULT_SCALE = 1.0;
+    /** Common pick Z for every feeder on this bed, in millimeters. */
+    static final double DEFAULT_Z = -90.500;
 
     static final int FRONT_FIRST = 1;
     static final int FRONT_LAST = 25;
@@ -51,6 +53,7 @@ class FeederLayout {
     double blX, blY;
     double brX, brY;
     double scale;
+    double z;
 
     static FeederLayout load() {
         FeederLayout l = new FeederLayout();
@@ -63,6 +66,7 @@ class FeederLayout {
         l.brX = PREFS.getDouble("layout.br.x", DEFAULT_BR_X);
         l.brY = PREFS.getDouble("layout.br.y", DEFAULT_BR_Y);
         l.scale = PREFS.getDouble("layout.scale", DEFAULT_SCALE);
+        l.z = PREFS.getDouble("layout.z", DEFAULT_Z);
         return l;
     }
 
@@ -76,6 +80,7 @@ class FeederLayout {
         PREFS.putDouble("layout.br.x", brX);
         PREFS.putDouble("layout.br.y", brY);
         PREFS.putDouble("layout.scale", scale);
+        PREFS.putDouble("layout.z", z);
     }
 
     /**
@@ -97,6 +102,6 @@ class FeederLayout {
         else {
             return null;
         }
-        return new Location(LengthUnit.Millimeters, x * scale, y * scale, 0, 0);
+        return new Location(LengthUnit.Millimeters, x * scale, y * scale, z, 0);
     }
 }

@@ -13,6 +13,8 @@ import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -34,6 +36,7 @@ import javax.swing.JComboBox;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JTabbedPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
@@ -43,9 +46,13 @@ import javax.swing.event.DocumentListener;
 import javax.swing.text.JTextComponent;
 
 import org.openpnp.gui.MainFrame;
+
+import org.openpnp.machine.hwgc.HwgcDriver;
 import org.openpnp.machine.hwgc.HwgcDvrCamera;
+
 import org.openpnp.model.Configuration;
 import org.openpnp.model.Job;
+import org.openpnp.spi.Driver;
 import org.openpnp.spi.Machine;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
@@ -91,6 +98,7 @@ public class DeltaProtoPanel extends JPanel {
     private final JTextField brX = new JTextField(8);
     private final JTextField brY = new JTextField(8);
     private final JTextField scaleField = new JTextField(6);
+    private final JTextField zField = new JTextField(8);
 
     public DeltaProtoPanel() {
         super(new BorderLayout(8, 8));
@@ -98,18 +106,37 @@ public class DeltaProtoPanel extends JPanel {
 
         loadLayoutIntoFields(FeederLayout.load());
 
+        // ── Main tab ──
+        JPanel mainTab = new JPanel(new BorderLayout(8, 8));
+
+        JPanel mainTop = new JPanel();
+        mainTop.setLayout(new BoxLayout(mainTop, BoxLayout.Y_AXIS));
+        mainTop.add(buildTrackControlPanel());
+        mainTop.add(Box.createVerticalStrut(4));
+        mainTop.add(buildJobPanel());
+
+        mainTab.add(mainTop, BorderLayout.NORTH);
+        mainTab.add(buildActionsPanel(), BorderLayout.CENTER);
+
+        // ── Settings tab ──
+        JPanel settingsTab = new JPanel();
+        settingsTab.setLayout(new BoxLayout(settingsTab, BoxLayout.Y_AXIS));
+        settingsTab.add(buildConfigPanel());
+        settingsTab.add(Box.createVerticalStrut(4));
+        settingsTab.add(buildLayoutPanel());
+
+        // ── Tabbed pane ──
+        JTabbedPane tabs = new JTabbedPane();
+        tabs.addTab("Main", mainTab);
+        tabs.addTab("Settings", settingsTab);
+
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
         top.add(buildHeader());
         top.add(Box.createVerticalStrut(8));
-        top.add(buildConfigPanel());
-        top.add(Box.createVerticalStrut(4));
-        top.add(buildLayoutPanel());
-        top.add(Box.createVerticalStrut(4));
-        top.add(buildJobPanel());
 
         add(top, BorderLayout.NORTH);
-        add(buildActionsPanel(), BorderLayout.CENTER);
+        add(tabs, BorderLayout.CENTER);
         add(buildLogPanel(), BorderLayout.SOUTH);
 
         // Initial fetch so the dropdown isn't empty before the user types.
@@ -126,6 +153,143 @@ public class DeltaProtoPanel extends JPanel {
         title.setFont(title.getFont().deriveFont(Font.BOLD, 18f));
         p.add(title);
         return p;
+    }
+
+    private JPanel buildTrackControlPanel() {
+        JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
+        p.setBorder(new TitledBorder("Track control"));
+
+        // Track+ (widen): hold to move, release to stop
+        JButton trackPlusBtn = new JButton("Track +");
+        trackPlusBtn.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                try {
+                    HwgcDriver driver = findHwgcDriver();
+                    if (driver != null) {
+                        driver.sendTrackConstantSpeed(0, 7);
+                        log("Track+ moving…");
+                    }
+                } catch (Exception ex) {
+                    log("Track+ failed: " + ex.getMessage());
+                }
+            }
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                try {
+                    HwgcDriver driver = findHwgcDriver();
+                    if (driver != null) {
+                        driver.sendTrackStopMove();
+                        log("Track+ stopped.");
+                    }
+                } catch (Exception ex) {
+                    log("Track stop failed: " + ex.getMessage());
+                }
+            }
+        });
+        p.add(trackPlusBtn);
+
+        // Track- (narrow): hold to move, release to stop
+        JButton trackMinusBtn = new JButton("Track -");
+        trackMinusBtn.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                try {
+                    HwgcDriver driver = findHwgcDriver();
+                    if (driver != null) {
+                        driver.sendTrackConstantSpeed(1, 7);
+                        log("Track- moving…");
+                    }
+                } catch (Exception ex) {
+                    log("Track- failed: " + ex.getMessage());
+                }
+            }
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                try {
+                    HwgcDriver driver = findHwgcDriver();
+                    if (driver != null) {
+                        driver.sendTrackStopMove();
+                        log("Track- stopped.");
+                    }
+                } catch (Exception ex) {
+                    log("Track stop failed: " + ex.getMessage());
+                }
+            }
+        });
+        p.add(trackMinusBtn);
+
+        // Clamp
+        JButton clampBtn = new JButton("Clamp");
+        clampBtn.addActionListener(e -> {
+            try {
+                HwgcDriver driver = findHwgcDriver();
+                if (driver != null) {
+                    driver.sendExecutePlywood(0, true);
+                    log("Clamp executed.");
+                }
+            } catch (Exception ex) {
+                log("Clamp failed: " + ex.getMessage());
+            }
+        });
+        p.add(clampBtn);
+
+        // Unclamp
+        JButton unclampBtn = new JButton("Unclamp");
+        unclampBtn.addActionListener(e -> {
+            try {
+                HwgcDriver driver = findHwgcDriver();
+                if (driver != null) {
+                    driver.sendExecutePlywood(0, false);
+                    log("Unclamp executed.");
+                }
+            } catch (Exception ex) {
+                log("Unclamp failed: " + ex.getMessage());
+            }
+        });
+        p.add(unclampBtn);
+
+        // Inboard
+        JButton inboardBtn = new JButton("Inboard");
+        inboardBtn.addActionListener(e -> {
+            try {
+                HwgcDriver driver = findHwgcDriver();
+                if (driver != null) {
+                    driver.sendInBoard();
+                    log("Inboard executed.");
+                }
+            } catch (Exception ex) {
+                log("Inboard failed: " + ex.getMessage());
+            }
+        });
+        p.add(inboardBtn);
+
+        // Outboard
+        JButton outboardBtn = new JButton("Outboard");
+        outboardBtn.addActionListener(e -> {
+            try {
+                HwgcDriver driver = findHwgcDriver();
+                if (driver != null) {
+                    driver.sendOutBoard();
+                    log("Outboard executed.");
+                }
+            } catch (Exception ex) {
+                log("Outboard failed: " + ex.getMessage());
+            }
+        });
+        p.add(outboardBtn);
+
+        return p;
+    }
+
+    private HwgcDriver findHwgcDriver() {
+        for (Driver d : Configuration.get().getMachine().getDrivers()) {
+            if (d instanceof HwgcDriver) {
+                return (HwgcDriver) d;
+            }
+        }
+        log("No HwgcDriver found.");
+        return null;
     }
 
     private JPanel buildConfigPanel() {
@@ -179,12 +343,19 @@ public class DeltaProtoPanel extends JPanel {
         addCornerRow(p, c, 3, "Back-Left   (slot 26)",  blX, blY);
         addCornerRow(p, c, 4, "Back-Right  (slot 50)",  brX, brY);
 
-        // Scale + save
+        // Scale
         c.gridy = 5;
         c.gridx = 0;
         p.add(new JLabel("Scale → mm:"), c);
         c.gridx = 1;
         p.add(scaleField, c);
+
+        // Pick Z (applied to every imported feeder)
+        c.gridy = 6;
+        c.gridx = 0;
+        p.add(new JLabel("Pick Z (mm):"), c);
+        c.gridx = 1;
+        p.add(zField, c);
         c.gridx = 2;
         JButton saveBtn = new JButton("Save layout");
         saveBtn.addActionListener(e -> saveLayout());
@@ -214,6 +385,7 @@ public class DeltaProtoPanel extends JPanel {
         brX.setText(Double.toString(l.brX));
         brY.setText(Double.toString(l.brY));
         scaleField.setText(Double.toString(l.scale));
+        zField.setText(Double.toString(l.z));
     }
 
     private FeederLayout readLayoutFromFields() {
@@ -227,6 +399,7 @@ public class DeltaProtoPanel extends JPanel {
         l.brX = parseDouble(brX.getText(), FeederLayout.DEFAULT_BR_X);
         l.brY = parseDouble(brY.getText(), FeederLayout.DEFAULT_BR_Y);
         l.scale = parseDouble(scaleField.getText(), FeederLayout.DEFAULT_SCALE);
+        l.z = parseDouble(zField.getText(), FeederLayout.DEFAULT_Z);
         return l;
     }
 
@@ -287,6 +460,12 @@ public class DeltaProtoPanel extends JPanel {
     private JPanel buildActionsPanel() {
         JPanel p = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 8));
         p.setBorder(new TitledBorder("Actions"));
+
+        JButton setupFpBtn = new JButton("Setup footprints");
+        setupFpBtn.setToolTipText(
+                "Create R/C packages (R0201..C1206) with footprints and JUKI nozzle assignments");
+        setupFpBtn.addActionListener(e -> runSetupFootprints(setupFpBtn));
+        p.add(setupFpBtn);
 
         JButton importBtn = new JButton("Import feeders");
         importBtn.addActionListener(e -> runImport(importBtn));
@@ -375,6 +554,25 @@ public class DeltaProtoPanel extends JPanel {
         }.execute();
     }
 
+    private void runSetupFootprints(JButton trigger) {
+        trigger.setEnabled(false);
+        log("Setting up R/C footprint packages …");
+        try {
+            BaselineFootprints.SetupResult r = BaselineFootprints.setupAllPackages();
+            Configuration.get().save();
+            log(r.toString());
+            for (String w : r.warnings) {
+                log("  ! " + w);
+            }
+        }
+        catch (Exception ex) {
+            log("Setup failed: " + ex.getMessage());
+        }
+        finally {
+            trigger.setEnabled(true);
+        }
+    }
+
     // ── Job import actions ──
 
     private String currentSearchText() {
@@ -420,7 +618,9 @@ public class DeltaProtoPanel extends JPanel {
                     // model resets the editor to the first item otherwise.
                     projectCombo.setSelectedItem(null);
                     projectCombo.getEditor().setItem(preserved);
-                    if (projectCombo.isPopupVisible() == false && results.size() > 0) {
+                    if (!preserved.isEmpty()
+                            && projectCombo.isPopupVisible() == false
+                            && results.size() > 0) {
                         projectCombo.showPopup();
                     }
                 }

@@ -1,0 +1,13 @@
+<cv-pipeline>
+   <stages>
+      <cv-stage class="org.openpnp.vision.pipeline.stages.ImageCapture" name="0" enabled="true" default-light="true" settle-first="true" count="1"/>
+      <cv-stage class="org.openpnp.vision.pipeline.stages.BlurGaussian" name="blur" enabled="true" kernel-size="5"/>
+      <cv-stage class="org.openpnp.vision.pipeline.stages.ConvertColor" name="grayscale" enabled="true" conversion="Bgr2Gray"/>
+      <cv-stage class="org.openpnp.vision.pipeline.stages.Threshold" name="threshold" enabled="true" threshold="100" auto="true" invert="true"/>
+      <cv-stage class="org.openpnp.vision.pipeline.stages.DetectCirclesHough" name="results" enabled="true" min-distance="20" min-diameter="10" max-diameter="80" param1="80" param2="12"/>
+      <cv-stage class="org.openpnp.vision.pipeline.stages.ImageRecall" name="recall" enabled="true" image-stage-name="0"/>
+      <cv-stage class="org.openpnp.vision.pipeline.stages.DrawCircles" name="draw" enabled="true" circles-stage-name="results" thickness="2">
+         <color r="0" g="255" b="0" a="255"/>
+      </cv-stage>
+   </stages>
+</cv-pipeline>
