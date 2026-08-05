@@ -84,6 +84,8 @@ public class DeltaProtoPanel extends JPanel {
     private static final double DEFAULT_BOARD_X = 200.000;
     private static final double DEFAULT_BOARD_Y = 160.000;
     private static final double DEFAULT_BOARD_Z = -110.000;
+    private static final String PREF_KEY_PLACEMENT_RETRIES = "deltaproto.placementRetries";
+    private static final int DEFAULT_PLACEMENT_RETRIES = 3;
     private static final String DEFAULT_ENDPOINT =
             "https://deltaproto.com/api/openpnp/feeders?machine=Buddy%202";
     private static final String DEFAULT_JOB_ENDPOINT =
@@ -133,6 +135,7 @@ public class DeltaProtoPanel extends JPanel {
     private final JTextField defBoardX = new JTextField(8);
     private final JTextField defBoardY = new JTextField(8);
     private final JTextField defBoardZ = new JTextField(8);
+    private final JTextField retryAttemptsField = new JTextField(4);
 
     public DeltaProtoPanel() {
         super(new BorderLayout(8, 8));
@@ -389,7 +392,23 @@ public class DeltaProtoPanel extends JPanel {
         c.gridx = 5;
         p.add(defBoardZ, c);
 
+        // Row 1: placement retry attempts, applied to the job processor's
+        // maxPlacementRetries on every job import (job error handling is
+        // always set to Defer so failed placements are retried instead of
+        // stopping the machine).
+        c.gridy = 1;
+        c.gridx = 0;
+        c.gridwidth = 3;
+        p.add(new JLabel("Placement retry attempts:"), c);
+        c.gridx = 3;
+        c.gridwidth = 1;
+        retryAttemptsField.setText(Integer.toString(
+                prefs.getInt(PREF_KEY_PLACEMENT_RETRIES, DEFAULT_PLACEMENT_RETRIES)));
+        p.add(retryAttemptsField, c);
+
         c.gridx = 6;
+        c.gridy = 0;
+        c.gridheight = 2;
         c.fill = GridBagConstraints.NONE;
         JButton saveBtn = new JButton("Save defaults");
         saveBtn.addActionListener(e -> {
@@ -399,11 +418,23 @@ public class DeltaProtoPanel extends JPanel {
                     parseDouble(defBoardY.getText(), DEFAULT_BOARD_Y));
             prefs.putDouble(PREF_KEY_DEF_BOARD_Z,
                     parseDouble(defBoardZ.getText(), DEFAULT_BOARD_Z));
+            prefs.putInt(PREF_KEY_PLACEMENT_RETRIES, placementRetryAttempts());
             log("New project defaults saved.");
         });
         p.add(saveBtn, c);
 
         return p;
+    }
+
+    /** The configured number of placement retry attempts (min 0). */
+    private int placementRetryAttempts() {
+        int fallback = prefs.getInt(PREF_KEY_PLACEMENT_RETRIES, DEFAULT_PLACEMENT_RETRIES);
+        try {
+            return Math.max(0, Integer.parseInt(retryAttemptsField.getText().trim()));
+        }
+        catch (Exception e) {
+            return fallback;
+        }
     }
 
     /** The configured default PCB position for a newly imported job. */
@@ -923,6 +954,7 @@ public class DeltaProtoPanel extends JPanel {
                         log("Job import failed: empty payload");
                         return;
                     }
+                    applyPlacementRetries();
                     Configuration.get().save();
                     MainFrame.get().getJobTab().setJob(built.job);
                     log(built.result.toString());
@@ -935,6 +967,26 @@ public class DeltaProtoPanel extends JPanel {
                 }
             }
         }.execute();
+    }
+
+    /**
+     * Push the configured retry attempts into the job processor's
+     * maxPlacementRetries. Imported jobs use ErrorHandling.Defer, so a failed
+     * pick/align re-queues the placement and it is retried up to this many
+     * times before being marked errored (the job then continues with the
+     * remaining placements instead of stopping the machine).
+     */
+    private void applyPlacementRetries() {
+        int retries = placementRetryAttempts();
+        org.openpnp.spi.PnpJobProcessor jp = Configuration.get().getMachine().getPnpJobProcessor();
+        if (jp instanceof org.openpnp.machine.reference.ReferencePnpJobProcessor) {
+            ((org.openpnp.machine.reference.ReferencePnpJobProcessor) jp)
+                    .setMaxPlacementRetries(retries);
+            log("Placement retry attempts set to " + retries + " (error handling: Defer).");
+        }
+        else {
+            log("! Job processor is not ReferencePnpJobProcessor — retry setting not applied.");
+        }
     }
 
     /** DTO matching {@code OpenPnPController.ProjectOrderSummaryDao}. Public

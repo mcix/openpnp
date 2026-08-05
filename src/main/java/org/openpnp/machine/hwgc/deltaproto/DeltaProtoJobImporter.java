@@ -322,6 +322,12 @@ public class DeltaProtoJobImporter {
         boardLocation.setSide(Side.Top);
 
         Job job = new Job();
+        // Defer errors instead of stopping the whole job: a failed pick/align
+        // puts the placement back in the queue and it is retried up to the job
+        // processor's maxPlacementRetries before being marked errored. Without
+        // a vacuum sensor a failed pick only surfaces at bottom vision, so
+        // this is the only retry path that actually engages on this machine.
+        job.setErrorHandling(Job.ErrorHandling.Defer);
         job.addBoardOrPanelLocation(boardLocation);
 
         Logger.info("DeltaProto job import built: {}", result);
