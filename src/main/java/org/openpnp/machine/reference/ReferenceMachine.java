@@ -35,6 +35,7 @@ import org.openpnp.gui.support.Wizard;
 import org.openpnp.machine.hwgc.HwgcDriver;
 import org.openpnp.machine.hwgc.HwgcDvrCamera;
 import org.openpnp.machine.hwgc.HwgcFeeder;
+import org.openpnp.machine.hwgc.HwgcSignaler;
 import org.openpnp.machine.hwgc.HwgcUsb3Camera;
 import org.openpnp.machine.neoden4.NeoDen4Driver;
 import org.openpnp.machine.neoden4.NeoDen4FeederActuator;
@@ -505,6 +506,7 @@ public class ReferenceMachine extends AbstractMachine {
         l.add(SoundSignaler.class);
         l.add(ActuatorSignaler.class);
         l.add(Neoden4Signaler.class);
+        l.add(HwgcSignaler.class);
         return l;
     }
 

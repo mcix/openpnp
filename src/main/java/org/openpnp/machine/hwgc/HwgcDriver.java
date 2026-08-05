@@ -46,6 +46,7 @@ import org.openpnp.spi.ControllerAxis;
 import org.openpnp.spi.HeadMountable;
 import org.openpnp.spi.Machine;
 import org.openpnp.spi.MotionPlanner.CompletionType;
+import org.openpnp.spi.Signaler;
 import org.openpnp.spi.base.AbstractHeadMountable;
 import org.pmw.tinylog.Logger;
 import org.simpleframework.xml.Attribute;
@@ -142,6 +143,10 @@ public class HwgcDriver extends AbstractReferenceDriver {
     private boolean homed;
     private boolean motionPending;
 
+    /** Guards packet writes so a full 7-byte command is never interleaved
+     *  with a command sent from another thread (e.g. the HwgcSignaler). */
+    private final Object txLock = new Object();
+
     private AxesLocation homingOffsets = new AxesLocation();
 
     // Cached machine positions (in machine units)
@@ -219,8 +224,22 @@ public class HwgcDriver extends AbstractReferenceDriver {
                 "Lights-Down", "Lights-Up", "Mark-LED", "Mark-LED-Ill",
                 "Fast-Cam-1-Light", "Fast-Cam-2-Light", "Fast-Cam-3-Light", "Fast-Cam-4-Light",
                 "Buzzer", "InBoard", "OutBoard", "Clamp", "Unclamp",
-                "Track-Wider", "Track-Narrower"}) {
+                "Track-Wider", "Track-Narrower",
+                "Stack-Light-Green", "Stack-Light-Yellow", "Stack-Light-Red"}) {
             getOrCreateMachineActuator(machine, actName);
+        }
+
+        // Job state signaler: stack lights + buzzer on error/finished
+        boolean hasSignaler = false;
+        for (Signaler s : machine.getSignalers()) {
+            if (s instanceof HwgcSignaler) {
+                hasSignaler = true;
+                break;
+            }
+        }
+        if (!hasSignaler) {
+            machine.addSignaler(new HwgcSignaler());
+            Logger.info("HWGC: created HwgcSignaler (stack lights + buzzer job signaling)");
         }
 
         // Cameras
@@ -608,8 +627,10 @@ public class HwgcDriver extends AbstractReferenceDriver {
         }
         Logger.trace("HWGC TX: {}", sb.toString().trim());
 
-        for (byte b : cmd) {
-            getCommunications().write(b & 0xFF);
+        synchronized (txLock) {
+            for (byte b : cmd) {
+                getCommunications().write(b & 0xFF);
+            }
         }
     }
 
@@ -887,11 +908,27 @@ public class HwgcDriver extends AbstractReferenceDriver {
         sendCommand(cmd);
     }
 
-    private void sendBuzzer(boolean on) throws Exception {
+    public void sendBuzzer(boolean on) throws Exception {
         byte[] cmd = new byte[CMD_PACKET_LEN];
         cmd[CMD_BYTE_INDEX] = (byte) BUZZER;
         cmd[5] = (byte) (on ? 1 : 0);
         sendCommand(cmd);
+    }
+
+    /**
+     * Switch a stack light (alarm lamp, 0x43) on or off.
+     * @param lampNo 0=green, 1=yellow, 2=red
+     */
+    public void sendAlarmLamp(int lampNo, boolean on) throws Exception {
+        byte[] cmd = new byte[CMD_PACKET_LEN];
+        cmd[CMD_BYTE_INDEX] = (byte) ALARM_LAMP;
+        cmd[4] = (byte) lampNo;
+        cmd[5] = (byte) (on ? 1 : 0);
+        sendCommand(cmd);
+    }
+
+    public boolean isConnected() {
+        return connected;
     }
 
     /** Send feeder activate/deactivate. feederNo is 0-based. */
@@ -1033,6 +1070,16 @@ public class HwgcDriver extends AbstractReferenceDriver {
         AxesLocation homeLocation = new AxesLocation(machine, this,
                 (axis) -> (axis.getHomeCoordinate()));
         homeLocation.setToDriverCoordinates(this);
+
+        // Homing done — clear all stack lights (green, yellow, red)
+        try {
+            for (int lamp = 0; lamp < 3; lamp++) {
+                sendAlarmLamp(lamp, false);
+            }
+        }
+        catch (Exception e) {
+            Logger.warn("HWGC: failed to clear stack lights after homing: {}", e.getMessage());
+        }
 
         homed = true;
         Logger.info("HWGC homing complete");
@@ -1414,6 +1461,15 @@ public class HwgcDriver extends AbstractReferenceDriver {
                 break;
             case "Buzzer":
                 sendBuzzer(on);
+                break;
+            case "Stack-Light-Green":
+                sendAlarmLamp(0, on);
+                break;
+            case "Stack-Light-Yellow":
+                sendAlarmLamp(1, on);
+                break;
+            case "Stack-Light-Red":
+                sendAlarmLamp(2, on);
                 break;
             case "InBoard":
                 if (on) {

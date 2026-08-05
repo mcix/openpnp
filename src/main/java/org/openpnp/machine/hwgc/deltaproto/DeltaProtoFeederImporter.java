@@ -48,12 +48,15 @@ import com.google.gson.Gson;
  *
  * Reconciliation strategy (full sync keyed by {@code feederNumber == slotIndex}):
  *  - <b>Create</b>: a payload slot with no matching HwgcFeeder yields a new
- *    {@link HwgcFeeder} with {@code feederNumber = slotIndex} and an empty
- *    location. The operator captures the physical pick location once in the
- *    GUI; subsequent imports preserve it.
- *  - <b>Update</b>: an existing HwgcFeeder has its {@code part} and
- *    {@code enabled} flag refreshed. Location, tape pitch and feed duration
- *    are deliberately left untouched — they are OpenPNP's responsibility.
+ *    {@link HwgcFeeder} with {@code feederNumber = slotIndex}, seeded with
+ *    the layout-derived pick location (if a layout is supplied). The operator
+ *    can then fine-tune the pick location in the GUI; subsequent imports
+ *    preserve it.
+ *  - <b>Update</b>: an existing HwgcFeeder has its {@code part} refreshed and
+ *    is always enabled — a slot present in the payload is ready to use, so
+ *    the operator shouldn't have to enable each feeder by hand. Location,
+ *    tape pitch and feed duration are deliberately left untouched — they are
+ *    OpenPNP's responsibility.
  *  - <b>Remove</b>: any HwgcFeeder whose {@code feederNumber} is not present
  *    in the payload is removed from the machine. Non-Hwgc feeders are never
  *    touched.
@@ -249,31 +252,31 @@ public class DeltaProtoFeederImporter {
                     hf.setFeederNumber(dto.slotIndex);
                     hf.setName("DeltaProto-" + dto.slotIndex);
                     hf.setPart(part);
-                    hf.setEnabled(dto.enabled);
+                    hf.setEnabled(true);
+                    // Seed the pick location from the configured layout for
+                    // NEW feeders only. Existing feeders keep their location
+                    // so manually fine-tuned pick positions survive
+                    // re-imports.
+                    if (layout != null) {
+                        Location loc = layout.locationForSlot(dto.slotIndex);
+                        if (loc != null) {
+                            hf.setLocation(loc);
+                        }
+                        else {
+                            result.warnings.add("Slot " + dto.slotIndex
+                                    + " outside configured feeder layout 1..50 — location not set");
+                        }
+                    }
                     machine.addFeeder(hf);
                     result.feedersCreated++;
                 }
                 else {
+                    // Existing feeder: only refresh the part (the backend owns
+                    // the slot→part mapping) and ensure it is enabled. The pick
+                    // location, tape pitch and feed settings are never touched.
                     hf.setPart(part);
-                    hf.setEnabled(dto.enabled);
+                    hf.setEnabled(true);
                     result.feedersUpdated++;
-                }
-
-                // Always (re)apply the layout-derived pick location so that
-                // tweaks to the DeltaProto panel layout propagate to every
-                // existing feeder on the next import — including slots whose
-                // position did not change, so drift can be corrected with a
-                // single click. Operator-taught overrides must be made after
-                // import.
-                if (layout != null) {
-                    Location loc = layout.locationForSlot(dto.slotIndex);
-                    if (loc != null) {
-                        hf.setLocation(loc);
-                    }
-                    else {
-                        result.warnings.add("Slot " + dto.slotIndex
-                                + " outside configured feeder layout 1..50 — location not updated");
-                    }
                 }
             }
         }

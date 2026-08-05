@@ -13,6 +13,10 @@ import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.net.URI;
@@ -24,34 +28,38 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.prefs.Preferences;
 import javax.swing.Timer;
 
 import javax.swing.Box;
 import javax.swing.BoxLayout;
-import javax.swing.ComboBoxEditor;
-import javax.swing.DefaultComboBoxModel;
+import javax.swing.DefaultListModel;
 import javax.swing.JButton;
-import javax.swing.JComboBox;
 import javax.swing.JLabel;
+import javax.swing.JList;
 import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
+import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
-import javax.swing.text.JTextComponent;
 
 import org.openpnp.gui.MainFrame;
 
 import org.openpnp.machine.hwgc.HwgcDriver;
 import org.openpnp.machine.hwgc.HwgcDvrCamera;
 
+import org.openpnp.model.BoardLocation;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.Job;
+import org.openpnp.model.LengthUnit;
+import org.openpnp.model.Location;
 import org.openpnp.spi.Driver;
 import org.openpnp.spi.Machine;
 import javax.swing.border.EmptyBorder;
@@ -82,11 +90,26 @@ public class DeltaProtoPanel extends JPanel {
     private final JTextField endpointField = new JTextField();
     private final JTextArea logArea = new JTextArea(10, 60);
 
-    // Job-import UI
-    private final DefaultComboBoxModel<ProjectOrderItem> projectModel = new DefaultComboBoxModel<>();
-    private final JComboBox<ProjectOrderItem> projectCombo = new JComboBox<>(projectModel);
+    // Job-import UI. Deliberately NOT an editable JComboBox: Swing
+    // reconfigures a combo's editor on every model/selection change,
+    // replacing and select-all-ing the text the user is typing. A plain
+    // text field with a non-focusable popup list never touches the text.
+    private final JTextField projectField = new JTextField();
+    private final DefaultListModel<ProjectOrderItem> suggestionModel = new DefaultListModel<>();
+    private final JList<ProjectOrderItem> suggestionList = new JList<>(suggestionModel);
+    private final JPopupMenu suggestionPopup = new JPopupMenu();
+    // Last item explicitly picked from the list; cleared as soon as the
+    // user edits the text again.
+    private ProjectOrderItem selectedProjectOrder;
     private final Timer searchDebounce = new Timer(250, e -> runProjectSearch());
     private SwingWorker<List<ProjectOrderItem>, Void> activeSearchWorker;
+    // Live readout of the loaded job's board location(s), polled because the
+    // job (and its BoardLocations) can be replaced wholesale at any time.
+    private final JLabel pcbPositionLabel = new JLabel(" ");
+    private final Timer pcbPositionRefresh = new Timer(1000, e -> refreshPcbPosition());
+    // True while we set the field text ourselves (accepting a suggestion);
+    // the DocumentListener must ignore those events or we'd search again.
+    private boolean suppressSearch = false;
 
     // Feeder layout fields — 4 corners × (x, y) + scale
     private final JTextField flX = new JTextField(8);
@@ -142,6 +165,9 @@ public class DeltaProtoPanel extends JPanel {
         // Initial fetch so the dropdown isn't empty before the user types.
         searchDebounce.setRepeats(false);
         runProjectSearch();
+
+        refreshPcbPosition();
+        pcbPositionRefresh.start();
     }
 
     // ── UI construction ──
@@ -433,19 +459,91 @@ public class DeltaProtoPanel extends JPanel {
 
         c.gridx = 1;
         c.weightx = 1;
-        projectCombo.setEditable(true);
-        // The combo box is editable so the user can type to filter; the typed
-        // text drives the debounced search against /api/openpnp/projectorders.
-        ComboBoxEditor editor = projectCombo.getEditor();
-        if (editor.getEditorComponent() instanceof JTextComponent) {
-            JTextComponent tc = (JTextComponent) editor.getEditorComponent();
-            tc.getDocument().addDocumentListener(new DocumentListener() {
-                @Override public void insertUpdate(DocumentEvent e) { searchDebounce.restart(); }
-                @Override public void removeUpdate(DocumentEvent e) { searchDebounce.restart(); }
-                @Override public void changedUpdate(DocumentEvent e) { searchDebounce.restart(); }
-            });
-        }
-        p.add(projectCombo, c);
+        // Typing drives the debounced search against
+        // /api/openpnp/projectorders; results show in a popup list below.
+        projectField.getDocument().addDocumentListener(new DocumentListener() {
+            private void changed() {
+                if (!suppressSearch) {
+                    selectedProjectOrder = null;
+                    searchDebounce.restart();
+                }
+            }
+            @Override public void insertUpdate(DocumentEvent e) { changed(); }
+            @Override public void removeUpdate(DocumentEvent e) { changed(); }
+            @Override public void changedUpdate(DocumentEvent e) { changed(); }
+        });
+
+        // Non-focusable so the field keeps focus (and the caret) while the
+        // popup is open; the list is driven by arrow keys and mouse only.
+        suggestionPopup.setFocusable(false);
+        suggestionPopup.setLayout(new BorderLayout());
+        suggestionList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        suggestionList.setVisibleRowCount(10);
+        suggestionPopup.add(new JScrollPane(suggestionList), BorderLayout.CENTER);
+
+        suggestionList.addMouseListener(new MouseAdapter() {
+            @Override public void mousePressed(MouseEvent e) {
+                int i = suggestionList.locationToIndex(e.getPoint());
+                if (i >= 0) {
+                    acceptSuggestion(suggestionModel.get(i));
+                }
+            }
+        });
+
+        projectField.addKeyListener(new KeyAdapter() {
+            @Override public void keyPressed(KeyEvent e) {
+                int size = suggestionModel.getSize();
+                if (!suggestionPopup.isVisible()) {
+                    if (e.getKeyCode() == KeyEvent.VK_DOWN && size > 0) {
+                        showSuggestionPopup();
+                        e.consume();
+                    }
+                    return;
+                }
+                int idx = suggestionList.getSelectedIndex();
+                switch (e.getKeyCode()) {
+                    case KeyEvent.VK_DOWN:
+                        if (size > 0) {
+                            int next = Math.min(idx + 1, size - 1);
+                            suggestionList.setSelectedIndex(next);
+                            suggestionList.ensureIndexIsVisible(next);
+                        }
+                        e.consume();
+                        break;
+                    case KeyEvent.VK_UP:
+                        if (size > 0) {
+                            int prev = Math.max(idx - 1, 0);
+                            suggestionList.setSelectedIndex(prev);
+                            suggestionList.ensureIndexIsVisible(prev);
+                        }
+                        e.consume();
+                        break;
+                    case KeyEvent.VK_ENTER:
+                        if (idx >= 0) {
+                            acceptSuggestion(suggestionModel.get(idx));
+                        }
+                        else {
+                            suggestionPopup.setVisible(false);
+                        }
+                        e.consume();
+                        break;
+                    case KeyEvent.VK_ESCAPE:
+                        suggestionPopup.setVisible(false);
+                        e.consume();
+                        break;
+                    default:
+                        break;
+                }
+            }
+        });
+
+        projectField.addFocusListener(new FocusAdapter() {
+            @Override public void focusLost(FocusEvent e) {
+                suggestionPopup.setVisible(false);
+            }
+        });
+
+        p.add(projectField, c);
 
         c.gridx = 2;
         c.weightx = 0;
@@ -454,7 +552,52 @@ public class DeltaProtoPanel extends JPanel {
         importBtn.addActionListener(e -> runJobImport(importBtn));
         p.add(importBtn, c);
 
+        c.gridy = 1;
+        c.gridx = 0;
+        c.weightx = 0;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        p.add(new JLabel("PCB position:"), c);
+
+        c.gridx = 1;
+        c.gridwidth = 2;
+        c.weightx = 1;
+        p.add(pcbPositionLabel, c);
+
         return p;
+    }
+
+    private void refreshPcbPosition() {
+        String text;
+        try {
+            Job job = MainFrame.get() != null && MainFrame.get().getJobTab() != null
+                    ? MainFrame.get().getJobTab().getJob() : null;
+            if (job == null || job.getBoardLocations().isEmpty()) {
+                text = "no job loaded";
+            }
+            else {
+                StringBuilder sb = new StringBuilder();
+                for (BoardLocation bl : job.getBoardLocations()) {
+                    Location loc = bl.getGlobalLocation().convertToUnits(LengthUnit.Millimeters);
+                    if (sb.length() > 0) {
+                        sb.append("   |   ");
+                    }
+                    String name = bl.getBoard() != null ? bl.getBoard().getName() : "?";
+                    boolean unset = loc.getX() == 0 && loc.getY() == 0;
+                    sb.append(String.format(Locale.US,
+                            "%s:  X %.3f  Y %.3f  Z %.3f  Rot %.1f°  (%s)%s",
+                            name, loc.getX(), loc.getY(), loc.getZ(), loc.getRotation(),
+                            bl.getGlobalSide(),
+                            unset ? "  — not set, capture it in the Job tab" : ""));
+                }
+                text = sb.toString();
+            }
+        }
+        catch (Exception ex) {
+            text = "unavailable (" + ex.getMessage() + ")";
+        }
+        if (!text.equals(pcbPositionLabel.getText())) {
+            pcbPositionLabel.setText(text);
+        }
     }
 
     private JPanel buildActionsPanel() {
@@ -575,25 +718,37 @@ public class DeltaProtoPanel extends JPanel {
 
     // ── Job import actions ──
 
-    private String currentSearchText() {
-        Object editorItem = projectCombo.getEditor().getItem();
-        if (editorItem == null) {
-            return "";
+    private void acceptSuggestion(ProjectOrderItem item) {
+        selectedProjectOrder = item;
+        suppressSearch = true;
+        try {
+            projectField.setText(item.toString());
         }
-        if (editorItem instanceof ProjectOrderItem) {
-            return ((ProjectOrderItem) editorItem).displayName;
+        finally {
+            suppressSearch = false;
         }
-        return editorItem.toString();
+        projectField.setCaretPosition(projectField.getText().length());
+        suggestionPopup.setVisible(false);
+    }
+
+    private void showSuggestionPopup() {
+        if (suggestionModel.getSize() == 0 || !projectField.isShowing()) {
+            return;
+        }
+        java.awt.Dimension pref = suggestionPopup.getPreferredSize();
+        suggestionPopup.setPopupSize(new java.awt.Dimension(
+                Math.max(projectField.getWidth(), 200),
+                Math.min(pref.height, 300)));
+        if (!suggestionPopup.isVisible()) {
+            suggestionPopup.show(projectField, 0, projectField.getHeight());
+        }
     }
 
     private void runProjectSearch() {
-        // Don't fire a search for selections we made ourselves; only when the
-        // user is clearly typing free text. We treat any text shorter than the
-        // current selection's displayName as filter input.
-        String text = currentSearchText();
-        Object selected = projectCombo.getSelectedItem();
-        if (selected instanceof ProjectOrderItem
-                && text.equals(((ProjectOrderItem) selected).displayName)) {
+        // Don't re-search the exact text of the suggestion the user just
+        // picked; only free typing should trigger a search.
+        String text = projectField.getText();
+        if (selectedProjectOrder != null && text.equals(selectedProjectOrder.toString())) {
             return;
         }
         if (activeSearchWorker != null && !activeSearchWorker.isDone()) {
@@ -609,19 +764,18 @@ public class DeltaProtoPanel extends JPanel {
             protected void done() {
                 try {
                     List<ProjectOrderItem> results = get();
-                    String preserved = currentSearchText();
-                    projectModel.removeAllElements();
+                    suggestionModel.clear();
                     for (ProjectOrderItem item : results) {
-                        projectModel.addElement(item);
+                        suggestionModel.addElement(item);
                     }
-                    // Keep the user's typing in the editor — replacing the
-                    // model resets the editor to the first item otherwise.
-                    projectCombo.setSelectedItem(null);
-                    projectCombo.getEditor().setItem(preserved);
-                    if (!preserved.isEmpty()
-                            && projectCombo.isPopupVisible() == false
-                            && results.size() > 0) {
-                        projectCombo.showPopup();
+                    suggestionList.clearSelection();
+                    // Only pop up while the user is actually in the field —
+                    // the initial fetch on panel construction stays silent.
+                    if (results.isEmpty()) {
+                        suggestionPopup.setVisible(false);
+                    }
+                    else if (projectField.isFocusOwner()) {
+                        showSuggestionPopup();
                     }
                 }
                 catch (Exception ex) {
@@ -664,14 +818,13 @@ public class DeltaProtoPanel extends JPanel {
         // Resolve the project order id: prefer a structured selection, fall
         // back to the raw text the user typed.
         String projectOrderId;
-        Object selected = projectCombo.getSelectedItem();
-        if (selected instanceof ProjectOrderItem) {
-            ProjectOrderItem item = (ProjectOrderItem) selected;
+        ProjectOrderItem item = selectedProjectOrder;
+        if (item != null) {
             projectOrderId = item.internalName != null && !item.internalName.isEmpty()
                     ? item.internalName : item.name;
         }
         else {
-            projectOrderId = currentSearchText();
+            projectOrderId = projectField.getText();
         }
         if (projectOrderId == null || projectOrderId.isBlank()) {
             log("No project order selected.");
