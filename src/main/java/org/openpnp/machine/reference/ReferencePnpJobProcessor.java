@@ -2571,6 +2571,21 @@ public class ReferencePnpJobProcessor extends AbstractPnpJobProcessor {
                             feeder.recordJobFault(getFeederFaultLimit(),getFeederFaultWindowSize(),e);
                             scriptFeederFault(feeder,e);
                         }
+                        // If the failed placement left a part on the nozzle (e.g. bottom vision
+                        // found nothing after a bad pick), discard it. Otherwise the retry sees
+                        // the part still "on" the nozzle, skips the physical re-pick and re-runs
+                        // vision on an empty nozzle — and an abandoned part would also break the
+                        // next placement planned for this nozzle ("part mismatch before pick").
+                        Nozzle errorNozzle = plannedPlacement.nozzle;
+                        if (errorNozzle != null && errorNozzle.getPart() != null) {
+                            try {
+                                discard(errorNozzle);
+                            }
+                            catch (Exception discardException) {
+                                Logger.warn("Discard before placement retry failed: {}",
+                                        discardException.getMessage());
+                            }
+                        }
                         if (feeder!=null && plannedPlacement.jobPlacement.getProcessingCount()<getMaxPlacementRetries()) {
                             // We should have another attempt at this placement.
                             // This can be quite a large number of retries because the feeder will

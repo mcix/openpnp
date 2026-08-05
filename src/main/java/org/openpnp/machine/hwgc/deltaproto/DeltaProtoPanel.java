@@ -671,6 +671,7 @@ public class DeltaProtoPanel extends JPanel {
         try {
             Job job = MainFrame.get() != null && MainFrame.get().getJobTab() != null
                     ? MainFrame.get().getJobTab().getJob() : null;
+            enforceDeferErrorHandling(job);
             if (job == null || job.getBoardLocations().isEmpty()) {
                 text = "no job loaded";
             }
@@ -967,6 +968,31 @@ public class DeltaProtoPanel extends JPanel {
                 }
             }
         }.execute();
+    }
+
+    /**
+     * Make sure the currently loaded job uses ErrorHandling.Defer and the job
+     * processor uses the configured retry attempts — no matter where the job
+     * came from (DeltaProto import, File > Open, recent jobs). Without a
+     * vacuum sensor this machine can only retry via Defer; a job left on the
+     * default Alert stops the machine on the first failed pick/align.
+     * Called from the 1-second UI refresh timer; only acts on change.
+     */
+    private void enforceDeferErrorHandling(Job job) {
+        if (job != null && job.getErrorHandling() != Job.ErrorHandling.Defer) {
+            job.setErrorHandling(Job.ErrorHandling.Defer);
+            log("Job error handling set to Defer (failed placements are retried, job continues).");
+        }
+        int retries = placementRetryAttempts();
+        org.openpnp.spi.PnpJobProcessor jp = Configuration.get().getMachine().getPnpJobProcessor();
+        if (jp instanceof org.openpnp.machine.reference.ReferencePnpJobProcessor) {
+            org.openpnp.machine.reference.ReferencePnpJobProcessor rjp =
+                    (org.openpnp.machine.reference.ReferencePnpJobProcessor) jp;
+            if (rjp.getMaxPlacementRetries() != retries) {
+                rjp.setMaxPlacementRetries(retries);
+                log("Placement retry attempts set to " + retries + ".");
+            }
+        }
     }
 
     /**
