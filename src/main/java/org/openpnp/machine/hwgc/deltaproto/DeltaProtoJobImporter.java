@@ -110,6 +110,15 @@ public class DeltaProtoJobImporter {
      * JGoodies BeansBinding, which throws on off-EDT mutations.
      */
     static JobBuildResult buildJob(Payload payload) {
+        return buildJob(payload, null);
+    }
+
+    /**
+     * @param defaultBoardLocation seed location for the new BoardLocation
+     *        (e.g. the configured default PCB position); null falls back to
+     *        0,0,0,0.
+     */
+    static JobBuildResult buildJob(Payload payload, Location defaultBoardLocation) {
         ImportResult result = new ImportResult();
         if (payload == null) {
             result.warnings.add("Empty payload from DeltaProto backend");
@@ -307,7 +316,9 @@ public class DeltaProtoJobImporter {
         }
 
         BoardLocation boardLocation = new BoardLocation(board);
-        boardLocation.setLocation(new Location(LengthUnit.Millimeters, 0.0, 0.0, 0.0, 0.0));
+        boardLocation.setLocation(defaultBoardLocation != null
+                ? defaultBoardLocation
+                : new Location(LengthUnit.Millimeters, 0.0, 0.0, 0.0, 0.0));
         boardLocation.setSide(Side.Top);
 
         Job job = new Job();

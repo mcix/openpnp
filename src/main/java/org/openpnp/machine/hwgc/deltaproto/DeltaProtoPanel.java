@@ -78,6 +78,12 @@ public class DeltaProtoPanel extends JPanel {
 
     private static final String PREF_KEY_ENDPOINT = "deltaproto.feederEndpoint";
     private static final String PREF_KEY_JOB_ENDPOINT = "deltaproto.jobEndpoint";
+    private static final String PREF_KEY_DEF_BOARD_X = "deltaproto.defaultBoardX";
+    private static final String PREF_KEY_DEF_BOARD_Y = "deltaproto.defaultBoardY";
+    private static final String PREF_KEY_DEF_BOARD_Z = "deltaproto.defaultBoardZ";
+    private static final double DEFAULT_BOARD_X = 200.000;
+    private static final double DEFAULT_BOARD_Y = 160.000;
+    private static final double DEFAULT_BOARD_Z = -110.000;
     private static final String DEFAULT_ENDPOINT =
             "https://deltaproto.com/api/openpnp/feeders?machine=Buddy%202";
     private static final String DEFAULT_JOB_ENDPOINT =
@@ -123,6 +129,11 @@ public class DeltaProtoPanel extends JPanel {
     private final JTextField scaleField = new JTextField(6);
     private final JTextField zField = new JTextField(8);
 
+    // New-project defaults — seed PCB position for a freshly imported job
+    private final JTextField defBoardX = new JTextField(8);
+    private final JTextField defBoardY = new JTextField(8);
+    private final JTextField defBoardZ = new JTextField(8);
+
     public DeltaProtoPanel() {
         super(new BorderLayout(8, 8));
         setBorder(new EmptyBorder(8, 8, 8, 8));
@@ -145,6 +156,8 @@ public class DeltaProtoPanel extends JPanel {
         JPanel settingsTab = new JPanel();
         settingsTab.setLayout(new BoxLayout(settingsTab, BoxLayout.Y_AXIS));
         settingsTab.add(buildConfigPanel());
+        settingsTab.add(Box.createVerticalStrut(4));
+        settingsTab.add(buildNewProjectDefaultsPanel());
         settingsTab.add(Box.createVerticalStrut(4));
         settingsTab.add(buildLayoutPanel());
 
@@ -347,6 +360,62 @@ public class DeltaProtoPanel extends JPanel {
         p.add(saveBtn, c);
 
         return p;
+    }
+
+    /** Settings section for the PCB position a freshly imported job starts at. */
+    private JPanel buildNewProjectDefaultsPanel() {
+        JPanel p = new JPanel(new GridBagLayout());
+        p.setBorder(new TitledBorder("New project defaults (PCB position, mm)"));
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(2, 4, 2, 4);
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.gridy = 0;
+
+        defBoardX.setText(Double.toString(prefs.getDouble(PREF_KEY_DEF_BOARD_X, DEFAULT_BOARD_X)));
+        defBoardY.setText(Double.toString(prefs.getDouble(PREF_KEY_DEF_BOARD_Y, DEFAULT_BOARD_Y)));
+        defBoardZ.setText(Double.toString(prefs.getDouble(PREF_KEY_DEF_BOARD_Z, DEFAULT_BOARD_Z)));
+
+        c.gridx = 0;
+        p.add(new JLabel("X:"), c);
+        c.gridx = 1;
+        p.add(defBoardX, c);
+        c.gridx = 2;
+        p.add(new JLabel("Y:"), c);
+        c.gridx = 3;
+        p.add(defBoardY, c);
+        c.gridx = 4;
+        p.add(new JLabel("Z:"), c);
+        c.gridx = 5;
+        p.add(defBoardZ, c);
+
+        c.gridx = 6;
+        c.fill = GridBagConstraints.NONE;
+        JButton saveBtn = new JButton("Save defaults");
+        saveBtn.addActionListener(e -> {
+            prefs.putDouble(PREF_KEY_DEF_BOARD_X,
+                    parseDouble(defBoardX.getText(), DEFAULT_BOARD_X));
+            prefs.putDouble(PREF_KEY_DEF_BOARD_Y,
+                    parseDouble(defBoardY.getText(), DEFAULT_BOARD_Y));
+            prefs.putDouble(PREF_KEY_DEF_BOARD_Z,
+                    parseDouble(defBoardZ.getText(), DEFAULT_BOARD_Z));
+            log("New project defaults saved.");
+        });
+        p.add(saveBtn, c);
+
+        return p;
+    }
+
+    /** The configured default PCB position for a newly imported job. */
+    private Location defaultBoardLocation() {
+        return new Location(LengthUnit.Millimeters,
+                parseDouble(defBoardX.getText(),
+                        prefs.getDouble(PREF_KEY_DEF_BOARD_X, DEFAULT_BOARD_X)),
+                parseDouble(defBoardY.getText(),
+                        prefs.getDouble(PREF_KEY_DEF_BOARD_Y, DEFAULT_BOARD_Y)),
+                parseDouble(defBoardZ.getText(),
+                        prefs.getDouble(PREF_KEY_DEF_BOARD_Z, DEFAULT_BOARD_Z)),
+                0.0);
     }
 
     private JPanel buildLayoutPanel() {
@@ -849,7 +918,7 @@ public class DeltaProtoPanel extends JPanel {
                 try {
                     DeltaProtoJobImporter.Payload payload = get();
                     DeltaProtoJobImporter.JobBuildResult built =
-                            DeltaProtoJobImporter.buildJob(payload);
+                            DeltaProtoJobImporter.buildJob(payload, defaultBoardLocation());
                     if (built.job == null) {
                         log("Job import failed: empty payload");
                         return;
