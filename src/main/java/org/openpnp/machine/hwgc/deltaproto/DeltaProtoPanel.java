@@ -137,6 +137,15 @@ public class DeltaProtoPanel extends JPanel {
     private final JTextField defBoardZ = new JTextField(8);
     private final JTextField retryAttemptsField = new JTextField(4);
 
+    // Plankje layout fields — pin1 + pin40 positions, strip direction, Z
+    private final JTextField pjPin1X = new JTextField(8);
+    private final JTextField pjPin1Y = new JTextField(8);
+    private final JTextField pjPin40X = new JTextField(8);
+    private final JTextField pjPin40Y = new JTextField(8);
+    private final javax.swing.JComboBox<PlankjeLayout.StripDirection> pjDirectionCombo =
+            new javax.swing.JComboBox<>(PlankjeLayout.StripDirection.values());
+    private final JTextField pjZ = new JTextField(8);
+
     public DeltaProtoPanel() {
         super(new BorderLayout(8, 8));
         setBorder(new EmptyBorder(8, 8, 8, 8));
@@ -163,6 +172,8 @@ public class DeltaProtoPanel extends JPanel {
         settingsTab.add(buildNewProjectDefaultsPanel());
         settingsTab.add(Box.createVerticalStrut(4));
         settingsTab.add(buildLayoutPanel());
+        settingsTab.add(Box.createVerticalStrut(4));
+        settingsTab.add(buildPlankjePanel());
 
         // ── Tabbed pane ──
         JTabbedPane tabs = new JTabbedPane();
@@ -542,6 +553,69 @@ public class DeltaProtoPanel extends JPanel {
         FeederLayout l = readLayoutFromFields();
         l.save();
         log("Feeder layout saved.");
+    }
+
+    /** Settings section for the plankje (strip carrier board) layout. */
+    private JPanel buildPlankjePanel() {
+        JPanel p = new JPanel(new GridBagLayout());
+        p.setBorder(new TitledBorder("Plankje layout (40 strip pins)"));
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(2, 4, 2, 4);
+        c.fill = GridBagConstraints.HORIZONTAL;
+
+        PlankjeLayout l = PlankjeLayout.load();
+        pjPin1X.setText(Double.toString(l.pin1X));
+        pjPin1Y.setText(Double.toString(l.pin1Y));
+        pjPin40X.setText(Double.toString(l.pin40X));
+        pjPin40Y.setText(Double.toString(l.pin40Y));
+        pjDirectionCombo.setSelectedItem(l.direction);
+        pjZ.setText(Double.toString(l.z));
+
+        // Header row
+        c.gridy = 0;
+        c.gridx = 1;
+        p.add(new JLabel("X", JLabel.CENTER), c);
+        c.gridx = 2;
+        p.add(new JLabel("Y", JLabel.CENTER), c);
+
+        addCornerRow(p, c, 1, "Pin 1", pjPin1X, pjPin1Y);
+        addCornerRow(p, c, 2, "Pin 40", pjPin40X, pjPin40Y);
+
+        c.gridy = 3;
+        c.gridx = 0;
+        p.add(new JLabel("Strip direction:"), c);
+        c.gridx = 1;
+        p.add(pjDirectionCombo, c);
+
+        c.gridy = 4;
+        c.gridx = 0;
+        p.add(new JLabel("Pick Z (mm):"), c);
+        c.gridx = 1;
+        p.add(pjZ, c);
+        c.gridx = 2;
+        JButton saveBtn = new JButton("Save plankje");
+        saveBtn.addActionListener(e -> {
+            PlankjeLayout saved = readPlankjeFromFields();
+            saved.save();
+            log("Plankje layout saved.");
+        });
+        p.add(saveBtn, c);
+
+        return p;
+    }
+
+    private PlankjeLayout readPlankjeFromFields() {
+        PlankjeLayout l = new PlankjeLayout();
+        l.pin1X = parseDouble(pjPin1X.getText(), PlankjeLayout.DEFAULT_PIN1_X);
+        l.pin1Y = parseDouble(pjPin1Y.getText(), PlankjeLayout.DEFAULT_PIN1_Y);
+        l.pin40X = parseDouble(pjPin40X.getText(), PlankjeLayout.DEFAULT_PIN40_X);
+        l.pin40Y = parseDouble(pjPin40Y.getText(), PlankjeLayout.DEFAULT_PIN40_Y);
+        Object dir = pjDirectionCombo.getSelectedItem();
+        l.direction = dir instanceof PlankjeLayout.StripDirection
+                ? (PlankjeLayout.StripDirection) dir : PlankjeLayout.DEFAULT_DIRECTION;
+        l.z = parseDouble(pjZ.getText(), PlankjeLayout.DEFAULT_Z);
+        return l;
     }
 
     private JPanel buildJobPanel() {
