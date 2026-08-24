@@ -36,7 +36,7 @@ import org.openpnp.machine.hwgc.HwgcDriver;
 import org.openpnp.machine.hwgc.HwgcDvrCamera;
 import org.openpnp.machine.hwgc.HwgcFeeder;
 import org.openpnp.machine.hwgc.HwgcSignaler;
-import org.openpnp.machine.hwgc.deltaproto.DeltaProtoStripFeeder;
+import org.openpnp.machine.hwgc.deltaproto.DeltaProtoCoveredStripFeederV1;
 import org.openpnp.machine.hwgc.HwgcUsb3Camera;
 import org.openpnp.machine.neoden4.NeoDen4Driver;
 import org.openpnp.machine.neoden4.NeoDen4FeederActuator;
@@ -457,7 +457,7 @@ public class ReferenceMachine extends AbstractMachine {
         l.add(RapidFeeder.class);
         l.add(Neoden4Feeder.class);
         l.add(HwgcFeeder.class);
-        l.add(DeltaProtoStripFeeder.class);
+        l.add(DeltaProtoCoveredStripFeederV1.class);
         l.add(PhotonFeeder.class);
         l.add(BambooFeederAutoVision.class);
         l.addAll(registeredFeederClasses);

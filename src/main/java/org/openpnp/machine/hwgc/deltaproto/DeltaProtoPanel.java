@@ -137,14 +137,14 @@ public class DeltaProtoPanel extends JPanel {
     private final JTextField defBoardZ = new JTextField(8);
     private final JTextField retryAttemptsField = new JTextField(4);
 
-    // Plankje layout fields — pin1 + pin40 positions, strip direction, Z
+    // Plankje layout fields — pin1 + pin8 positions, pick Z, cover Z
     private final JTextField pjPin1X = new JTextField(8);
     private final JTextField pjPin1Y = new JTextField(8);
-    private final JTextField pjPin40X = new JTextField(8);
-    private final JTextField pjPin40Y = new JTextField(8);
-    private final javax.swing.JComboBox<PlankjeLayout.StripDirection> pjDirectionCombo =
-            new javax.swing.JComboBox<>(PlankjeLayout.StripDirection.values());
+    private final JTextField pjPin8X = new JTextField(8);
+    private final JTextField pjPin8Y = new JTextField(8);
     private final JTextField pjZ = new JTextField(8);
+    private final JTextField pjCoverZ = new JTextField(8);
+    private final JTextField pjFeederPinField = new JTextField(4);
 
     public DeltaProtoPanel() {
         super(new BorderLayout(8, 8));
@@ -555,10 +555,13 @@ public class DeltaProtoPanel extends JPanel {
         log("Feeder layout saved.");
     }
 
-    /** Settings section for the plankje (strip carrier board) layout. */
+    /** Settings section for the plankje (covered strip carrier) layout.
+     *  Teach pin 1 and pin 8 with the down-looking camera; pins 2..7 are
+     *  interpolated for the DeltaProtoCoveredStripFeederV1 feeders. */
     private JPanel buildPlankjePanel() {
         JPanel p = new JPanel(new GridBagLayout());
-        p.setBorder(new TitledBorder("Plankje layout (40 strip pins)"));
+        p.setBorder(new TitledBorder("Plankje layout (8 covered strips, pin 1 → pin 8 = "
+                + PlankjeLayout.PIN1_TO_PIN8_MM + " mm)"));
 
         GridBagConstraints c = new GridBagConstraints();
         c.insets = new Insets(2, 4, 2, 4);
@@ -567,10 +570,10 @@ public class DeltaProtoPanel extends JPanel {
         PlankjeLayout l = PlankjeLayout.load();
         pjPin1X.setText(Double.toString(l.pin1X));
         pjPin1Y.setText(Double.toString(l.pin1Y));
-        pjPin40X.setText(Double.toString(l.pin40X));
-        pjPin40Y.setText(Double.toString(l.pin40Y));
-        pjDirectionCombo.setSelectedItem(l.direction);
+        pjPin8X.setText(Double.toString(l.pin8X));
+        pjPin8Y.setText(Double.toString(l.pin8Y));
         pjZ.setText(Double.toString(l.z));
+        pjCoverZ.setText(Double.toString(l.coverZ));
 
         // Header row
         c.gridy = 0;
@@ -579,14 +582,22 @@ public class DeltaProtoPanel extends JPanel {
         c.gridx = 2;
         p.add(new JLabel("Y", JLabel.CENTER), c);
 
-        addCornerRow(p, c, 1, "Pin 1", pjPin1X, pjPin1Y);
-        addCornerRow(p, c, 2, "Pin 40", pjPin40X, pjPin40Y);
+        addPlankjePinRow(p, c, 1, "Pin 1", pjPin1X, pjPin1Y);
+        addPlankjePinRow(p, c, 2, "Pin 8", pjPin8X, pjPin8Y);
 
         c.gridy = 3;
-        c.gridx = 0;
-        p.add(new JLabel("Strip direction:"), c);
-        c.gridx = 1;
-        p.add(pjDirectionCombo, c);
+        c.gridx = 3;
+        c.gridwidth = 2;
+        // Fill pin 8 from pin 1 + the nominal 73.5 mm along X.
+        JButton fromPin1Btn = new JButton("Pin 8 = Pin 1 + " + PlankjeLayout.PIN1_TO_PIN8_MM + " mm X");
+        fromPin1Btn.addActionListener(e -> {
+            double x = parseDouble(pjPin1X.getText(), PlankjeLayout.DEFAULT_PIN1_X);
+            double y = parseDouble(pjPin1Y.getText(), PlankjeLayout.DEFAULT_PIN1_Y);
+            pjPin8X.setText(Double.toString(x + PlankjeLayout.PIN1_TO_PIN8_MM));
+            pjPin8Y.setText(Double.toString(y));
+        });
+        p.add(fromPin1Btn, c);
+        c.gridwidth = 1;
 
         c.gridy = 4;
         c.gridx = 0;
@@ -594,6 +605,13 @@ public class DeltaProtoPanel extends JPanel {
         c.gridx = 1;
         p.add(pjZ, c);
         c.gridx = 2;
+        p.add(new JLabel("Cover Z (mm):"), c);
+        c.gridx = 3;
+        p.add(pjCoverZ, c);
+
+        c.gridy = 5;
+        c.gridx = 3;
+        c.gridwidth = 2;
         JButton saveBtn = new JButton("Save plankje");
         saveBtn.addActionListener(e -> {
             PlankjeLayout saved = readPlankjeFromFields();
@@ -601,20 +619,175 @@ public class DeltaProtoPanel extends JPanel {
             log("Plankje layout saved.");
         });
         p.add(saveBtn, c);
+        c.gridwidth = 1;
+
+        // Feeder management: create one covered strip feeder per pin, and
+        // re-sync all existing ones from this panel's configuration.
+        c.gridy = 6;
+        c.gridx = 0;
+        p.add(new JLabel("Feeder pin (" + PlankjeLayout.PIN_FIRST + "-"
+                + PlankjeLayout.PIN_LAST + "):"), c);
+        c.gridx = 1;
+        pjFeederPinField.setText("1");
+        p.add(pjFeederPinField, c);
+        c.gridx = 2;
+        JButton createFeederBtn = new JButton("Create feeder");
+        createFeederBtn.setToolTipText(
+                "Create a DeltaProtoCoveredStripFeederV1 on this pin from the plankje config");
+        createFeederBtn.addActionListener(e -> createPlankjeFeeder());
+        p.add(createFeederBtn, c);
+        c.gridx = 3;
+        c.gridwidth = 2;
+        JButton updateFeedersBtn = new JButton("Update all feeders from config");
+        updateFeedersBtn.setToolTipText(
+                "Save the plankje config and re-sync every DeltaProtoCoveredStripFeederV1 to it");
+        updateFeedersBtn.addActionListener(e -> updatePlankjeFeeders());
+        p.add(updateFeedersBtn, c);
+        c.gridwidth = 1;
 
         return p;
+    }
+
+    /** Name convention for the 8 plankje feeders. */
+    private static String plankjeFeederName(int pin) {
+        return "Plankje-" + pin;
+    }
+
+    /** Create a DeltaProtoCoveredStripFeederV1 for the pin entered in the
+     *  panel, using the (saved) plankje configuration. */
+    private void createPlankjeFeeder() {
+        // The feeders derive their positions from the saved layout, so make
+        // sure what is on screen is what they will use.
+        PlankjeLayout l = readPlankjeFromFields();
+        l.save();
+
+        int pin;
+        try {
+            pin = Integer.parseInt(pjFeederPinField.getText().trim());
+        }
+        catch (Exception ex) {
+            log("Create feeder: invalid pin number '" + pjFeederPinField.getText() + "'.");
+            return;
+        }
+        if (pin < PlankjeLayout.PIN_FIRST || pin > PlankjeLayout.PIN_LAST) {
+            log("Create feeder: pin " + pin + " outside "
+                    + PlankjeLayout.PIN_FIRST + ".." + PlankjeLayout.PIN_LAST + ".");
+            return;
+        }
+
+        Machine machine = Configuration.get().getMachine();
+        for (org.openpnp.spi.Feeder f : machine.getFeeders()) {
+            if (f instanceof DeltaProtoCoveredStripFeederV1
+                    && ((DeltaProtoCoveredStripFeederV1) f).getPin() == pin) {
+                log("Create feeder: pin " + pin + " already has feeder '"
+                        + f.getName() + "'. Not creating a duplicate.");
+                return;
+            }
+        }
+
+        try {
+            DeltaProtoCoveredStripFeederV1 feeder = new DeltaProtoCoveredStripFeederV1();
+            feeder.setPin(pin);
+            feeder.setName(plankjeFeederName(pin));
+            // Mirror the pin position into the base feeder location for the
+            // standard OpenPNP UI; the pick location itself is derived live
+            // from the plankje layout.
+            feeder.setLocation(l.pinLocation(pin));
+            if (!Configuration.get().getParts().isEmpty()) {
+                // Placeholder part, like FeedersPanel does on manual create.
+                feeder.setPart(Configuration.get().getParts().get(0));
+            }
+            machine.addFeeder(feeder);
+            refreshFeedersTab();
+            log("Created feeder '" + feeder.getName() + "' on pin " + pin + " at "
+                    + String.format(Locale.US, "X %.3f Y %.3f",
+                            feeder.getOriginLocation().getX(),
+                            feeder.getOriginLocation().getY()));
+        }
+        catch (Exception ex) {
+            log("Create feeder failed: " + ex.getMessage());
+        }
+    }
+
+    /** Save the plankje config and re-sync every DeltaProtoCoveredStripFeederV1
+     *  (location mirror + name) to it. */
+    private void updatePlankjeFeeders() {
+        PlankjeLayout l = readPlankjeFromFields();
+        l.save();
+
+        int count = 0;
+        for (org.openpnp.spi.Feeder f : Configuration.get().getMachine().getFeeders()) {
+            if (!(f instanceof DeltaProtoCoveredStripFeederV1)) {
+                continue;
+            }
+            DeltaProtoCoveredStripFeederV1 feeder = (DeltaProtoCoveredStripFeederV1) f;
+            // Re-fires the derived-location property changes so any open
+            // wizard picks up the new plankje geometry too.
+            feeder.setPin(feeder.getPin());
+            feeder.setLocation(l.pinLocation(feeder.getPin()));
+            count++;
+        }
+        refreshFeedersTab();
+        log("Plankje layout saved; updated " + count + " covered strip feeder(s).");
+    }
+
+    private void refreshFeedersTab() {
+        SwingUtilities.invokeLater(() -> {
+            if (MainFrame.get() != null && MainFrame.get().getFeedersTab() != null) {
+                MainFrame.get().getFeedersTab().refresh();
+            }
+        });
+    }
+
+    /** A pin teach row: X/Y fields plus set-from-camera / move-camera-to. */
+    private void addPlankjePinRow(JPanel p, GridBagConstraints c, int row,
+            String label, JTextField xField, JTextField yField) {
+        c.gridy = row;
+        c.gridx = 0;
+        p.add(new JLabel(label), c);
+        c.gridx = 1;
+        p.add(xField, c);
+        c.gridx = 2;
+        p.add(yField, c);
+
+        c.gridx = 3;
+        JButton captureBtn = new JButton("Set from camera");
+        captureBtn.setToolTipText("Copy the current down-camera X/Y into " + label);
+        captureBtn.addActionListener(e -> org.openpnp.util.UiUtils.submitUiMachineTask(() -> {
+            Location loc = MainFrame.get().getMachineControls().getSelectedTool()
+                    .getHead().getDefaultCamera().getLocation()
+                    .convertToUnits(LengthUnit.Millimeters);
+            SwingUtilities.invokeLater(() -> {
+                xField.setText(String.format(java.util.Locale.US, "%.3f", loc.getX()));
+                yField.setText(String.format(java.util.Locale.US, "%.3f", loc.getY()));
+                log(label + " set from camera: X " + xField.getText() + "  Y " + yField.getText());
+            });
+        }));
+        p.add(captureBtn, c);
+
+        c.gridx = 4;
+        JButton moveBtn = new JButton("Camera →");
+        moveBtn.setToolTipText("Move the down-camera over the entered " + label + " position");
+        moveBtn.addActionListener(e -> org.openpnp.util.UiUtils.submitUiMachineTask(() -> {
+            Location target = new Location(LengthUnit.Millimeters,
+                    parseDouble(xField.getText(), 0),
+                    parseDouble(yField.getText(), 0),
+                    0, 0);
+            org.openpnp.util.MovableUtils.moveToLocationAtSafeZ(
+                    MainFrame.get().getMachineControls().getSelectedTool()
+                            .getHead().getDefaultCamera(), target);
+        }));
+        p.add(moveBtn, c);
     }
 
     private PlankjeLayout readPlankjeFromFields() {
         PlankjeLayout l = new PlankjeLayout();
         l.pin1X = parseDouble(pjPin1X.getText(), PlankjeLayout.DEFAULT_PIN1_X);
         l.pin1Y = parseDouble(pjPin1Y.getText(), PlankjeLayout.DEFAULT_PIN1_Y);
-        l.pin40X = parseDouble(pjPin40X.getText(), PlankjeLayout.DEFAULT_PIN40_X);
-        l.pin40Y = parseDouble(pjPin40Y.getText(), PlankjeLayout.DEFAULT_PIN40_Y);
-        Object dir = pjDirectionCombo.getSelectedItem();
-        l.direction = dir instanceof PlankjeLayout.StripDirection
-                ? (PlankjeLayout.StripDirection) dir : PlankjeLayout.DEFAULT_DIRECTION;
+        l.pin8X = parseDouble(pjPin8X.getText(), PlankjeLayout.DEFAULT_PIN8_X);
+        l.pin8Y = parseDouble(pjPin8Y.getText(), PlankjeLayout.DEFAULT_PIN8_Y);
         l.z = parseDouble(pjZ.getText(), PlankjeLayout.DEFAULT_Z);
+        l.coverZ = parseDouble(pjCoverZ.getText(), PlankjeLayout.DEFAULT_COVER_Z);
         return l;
     }
 

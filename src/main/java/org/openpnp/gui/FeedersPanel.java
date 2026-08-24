@@ -926,4 +926,9 @@ public class FeedersPanel extends JPanel implements WizardContainer {
     public void refresh(Feeder f) {
         tableModel.refresh(f);
     }
+
+    /** Reload the whole feeder table, picking up added/removed feeders. */
+    public void refresh() {
+        tableModel.refresh();
+    }
 }
