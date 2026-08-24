@@ -1663,6 +1663,143 @@ public class HwgcDriver extends AbstractReferenceDriver {
         jogXyConstantSpeed(XY_DIR_STOP, speed);
     }
 
+    // ──────────────────────────────────────────
+    //  Open-loop calibrated slow move (speed 1)
+    // ──────────────────────────────────────────
+
+    // Calibration from the java-driver JogBurstTest on the T4_50F (firmware
+    // 2412.200), Aug 2026 — see HwgcConnection.jogXyStepsOpenLoop there for
+    // the raw data. At jog speed 1 the XY axes move 0.88 machine units per
+    // ms, and the firmware stalls motion for exactly 1 ms while it processes
+    // each 0x18 keep-alive. Timed bursts are exactly repeatable (zero
+    // variance over 25 burst trials; open-loop landings verified to ±1 unit
+    // at 300 and 360 units):
+    //   distance_units = 0.88 × (t_ms − N_keepalives × 1 ms)
+    public static final double JOG_OL_UNITS_PER_MS     = 0.88;
+    public static final double JOG_OL_STALL_MS_PER_CMD = 1.0;
+    public static final int JOG_OL_KEEPALIVE_MS        = 10;
+
+    /**
+     * Slow, deterministic relative XY move at jog speed 1 that does NOT lift
+     * Z — for motion with a nozzle plunged (drag feeders, cover slides,
+     * probing). A normal moveTo uses 0x60, which makes the firmware retract
+     * all Z axes first; this uses the 0x18 constant-speed jog held for a
+     * calibrated duration instead, open loop (no position polling during the
+     * move). X moves first, then Y, each at ~0.8 units/ms effective.
+     *
+     * <p>Blocks until the move is complete, then re-syncs the OpenPnP X/Y
+     * axis coordinates (planner + driver) to the machine's actual position
+     * so subsequent regular moves start from the right place.
+     *
+     * @param dxMm signed relative X distance in OpenPnP millimeters
+     * @param dyMm signed relative Y distance in OpenPnP millimeters
+     *             (negative = south, toward the operator)
+     */
+    public void moveXyRelativeOpenLoop(double dxMm, double dyMm) throws Exception {
+        if (!homed) {
+            throw new Exception("HWGC driver: machine must be homed before movement");
+        }
+        int dMachX = (int) Math.round(dxMm * scaleX);
+        // Machine Y is inverted: machine Y=0 at the back / home corner
+        int dMachY = (int) Math.round(-dyMm * scaleY);
+        int[] xy = readCurrentXY();
+        int tx = xy[0] + dMachX;
+        int ty = xy[1] + dMachY;
+        if (tx < 0 || tx > maxX || ty < 0 || ty > maxY) {
+            throw new Exception("HWGC slowMoveOL: target " + tx + "," + ty
+                    + " outside machine limits " + maxX + "," + maxY);
+        }
+        Logger.debug("HWGC slowMoveOL: {},{} -> {},{} units ({},{} mm relative)",
+                xy[0], xy[1], tx, ty,
+                String.format("%.3f", dxMm), String.format("%.3f", dyMm));
+        try {
+            timedJogAxisOpenLoop(Integer.signum(dMachX), 0, Math.abs(dMachX));
+            timedJogAxisOpenLoop(0, Integer.signum(dMachY), Math.abs(dMachY));
+        }
+        finally {
+            jogXyStop(1);
+        }
+        Thread.sleep(120);  // settle so the final readout is truthful
+        readCurrentXY();
+        syncXyAxesToMachinePosition();
+        Logger.info("HWGC slowMoveOL: done at {},{} units (target {},{}, error {},{})",
+                posX, posY, tx, ty, posX - tx, posY - ty);
+    }
+
+    /**
+     * Jog one direction at speed 1 for the calibrated duration for
+     * {@code steps} machine units, refreshing the 0x18 keep-alive every
+     * 10 ms with nanoTime pacing (Thread.sleep alone jitters 1-15 ms on
+     * Windows, which would break the timing the calibration depends on).
+     * The stop deadline is extended by 1 ms for every keep-alive actually
+     * sent, solving steps = 0.88 × (t − N) dynamically.
+     */
+    private void timedJogAxisOpenLoop(int xDir, int yDir, int steps) throws Exception {
+        if (steps <= 0 || (xDir == 0 && yDir == 0)) {
+            return;
+        }
+        long motionNanos = (long) (steps / JOG_OL_UNITS_PER_MS * 1_000_000.0);
+        long stallNanos = (long) (JOG_OL_STALL_MS_PER_CMD * 1_000_000.0);
+        byte[] cmd = new byte[CMD_PACKET_LEN];
+        cmd[CMD_BYTE_INDEX] = (byte) XY_CONSTANT_SPEED;
+        cmd[2] = (byte) xDir;
+        cmd[3] = (byte) yDir;
+        cmd[5] = encodeSpeed(1);
+        long t0 = System.nanoTime();
+        long end = t0 + motionNanos;
+        long next = t0;
+        while (System.nanoTime() < end) {
+            sendCommand(cmd);
+            end += stallNanos;
+            next += JOG_OL_KEEPALIVE_MS * 1_000_000L;
+            spinUntilNanos(Math.min(next, end));
+        }
+        jogXyStop(1);
+        Thread.sleep(120);  // let the axis decelerate fully before the next one
+    }
+
+    /** Sleep-then-spin until the given nanoTime deadline (±~0.1 ms). */
+    private static void spinUntilNanos(long deadlineNanos) throws InterruptedException {
+        while (true) {
+            long left = deadlineNanos - System.nanoTime();
+            if (left <= 0) {
+                return;
+            }
+            if (left > 2_000_000L) {
+                Thread.sleep(1);
+            }
+            // else: busy-spin the last ~2 ms
+        }
+    }
+
+    /**
+     * Sync the cached targets and the OpenPnP X/Y axes (planner + driver
+     * coordinates) to where a raw jog actually left the machine, so
+     * subsequent regular moves start from the right place.
+     */
+    private void syncXyAxesToMachinePosition() throws Exception {
+        targetX = posX;
+        targetY = posY;
+        double xOff = homingOffsets.getCoordinate(homingOffsets.getAxis(Axis.Type.X));
+        double yOff = homingOffsets.getCoordinate(homingOffsets.getAxis(Axis.Type.Y));
+        double xMm = posX / scaleX + xOff;
+        double yMm = (maxY - posY) / scaleY + yOff;
+        Machine machine = Configuration.get().getMachine();
+        for (Axis axis : machine.getAxes()) {
+            if (axis instanceof ControllerAxis
+                    && ((ControllerAxis) axis).getDriver() == this) {
+                if (axis.getType() == Axis.Type.X) {
+                    ((ControllerAxis) axis).setLengthCoordinate(new Length(xMm, units));
+                    ((ControllerAxis) axis).setDriverLengthCoordinate(new Length(xMm, units));
+                }
+                else if (axis.getType() == Axis.Type.Y) {
+                    ((ControllerAxis) axis).setLengthCoordinate(new Length(yMm, units));
+                    ((ControllerAxis) axis).setDriverLengthCoordinate(new Length(yMm, units));
+                }
+            }
+        }
+    }
+
     /**
      * Jog Z at constant speed. Send once on press — firmware continues until jogStop().
      * Even nozzles (0, 2) need direction inversion because they share a motor with
