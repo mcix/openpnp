@@ -20,14 +20,21 @@
 package org.openpnp.machine.hwgc;
 
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
 import java.io.File;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 import javax.imageio.ImageIO;
+
+import com.sun.jna.Memory;
+import com.sun.jna.Pointer;
 
 import org.openpnp.gui.support.Wizard;
 import org.openpnp.machine.hwgc.wizards.HwgcDvrCameraConfigurationWizard;
@@ -42,6 +49,11 @@ import org.simpleframework.xml.Attribute;
  * Camera driver for HWGC DVR capture card channels (hwsys.dll).
  * Captures 1920x1080 AHD frames from the Cyclone IV FPGA + NVP6114 PCI-E card.
  *
+ * Frames are captured in memory via the SDK's RAW stream callback: a capture arms a
+ * per-channel latch, the callback copies the next YUYV frame for that channel, and the
+ * capture thread converts it to BGR with the SDK's ChangeYUVToRGB. The legacy
+ * SaveCaptureImage BMP-file path is kept only as a fallback if no frame arrives.
+ *
  * Typical channel mapping on SMT550:
  *   - Channels 0-3: Down-looking cameras (fiducial/mark detection)
  *   - Channel 4: Up-looking camera (component alignment)
@@ -52,11 +64,33 @@ public class HwgcDvrCamera extends ReferenceCamera {
     @Attribute(required = false)
     private int channel = 0;
 
+    private static final int MAX_CHANNELS = 8;
+    private static final int FRAME_WIDTH = 1920;
+    private static final int FRAME_HEIGHT = 1080;
+    private static final int FRAME_FPS = 25;
+    private static final int FRAME_WAIT_MS = 400;
+
     // Shared singleton — one InitHwDSPs() call for all camera instances
     private static HwgcDvrSdk sharedSdk;
     private static int sharedChannelCount;
     private static int openCount;
     private static final Object LOCK = new Object();
+    private static final int[] channelHandles = new int[MAX_CHANNELS];
+
+    // Per-channel snapshot state, written by the DLL's streaming thread
+    private static final Memory[] yuvBuffers = new Memory[MAX_CHANNELS];
+    private static final int[] frameWidths = new int[MAX_CHANNELS];
+    private static final int[] frameHeights = new int[MAX_CHANNELS];
+    private static final AtomicReferenceArray<CountDownLatch> pendingCaptures =
+            new AtomicReferenceArray<>(MAX_CHANNELS);
+
+    // Reused YUV->BGR conversion buffer, guarded by CONVERT_LOCK
+    private static Memory rgbBuffer;
+    private static final Object CONVERT_LOCK = new Object();
+
+    // The DLL keeps a raw pointer to the callback stub (there is no unregister export),
+    // so the stub must never be garbage collected — hold a static strong reference.
+    private static HwgcDvrSdk.RawStreamCallback rawCallback;
 
     private boolean opened;
     private File tempDir;
@@ -75,11 +109,92 @@ public class HwgcDvrCamera extends ReferenceCamera {
             return null;
         }
 
+        BufferedImage img = captureViaCallback();
+        if (img == null) {
+            Logger.warn("HWGC DVR: ch{} callback capture timed out, trying BMP fallback", channel);
+            img = captureViaBmp();
+        }
+        return img;
+    }
+
+    /**
+     * Arm the channel's latch and wait for the streaming callback to deliver the next
+     * frame, then convert it. Costs ~one frame period (40 ms at 25 fps) of latency and
+     * a few ms of conversion — no disk I/O.
+     */
+    private BufferedImage captureViaCallback() {
+        CountDownLatch latch = new CountDownLatch(1);
+        pendingCaptures.set(channel, latch);
+        try {
+            if (!latch.await(FRAME_WAIT_MS, TimeUnit.MILLISECONDS)) {
+                pendingCaptures.set(channel, null);
+                return null;
+            }
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            pendingCaptures.set(channel, null);
+            return null;
+        }
+
+        int width = frameWidths[channel];
+        int height = frameHeights[channel];
+        if (width <= 0 || height <= 0) {
+            return null;
+        }
+        int rgbSize = width * height * 3;
+        synchronized (CONVERT_LOCK) {
+            if (rgbBuffer == null || rgbBuffer.size() < rgbSize) {
+                rgbBuffer = new Memory(rgbSize);
+            }
+            sharedSdk.ChangeYUVToRGB(yuvBuffers[channel], rgbBuffer, width, height);
+            BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_3BYTE_BGR);
+            byte[] data = ((DataBufferByte) img.getRaster().getDataBuffer()).getData();
+            rgbBuffer.read(0, data, 0, rgbSize);
+            Logger.trace("HWGC DVR: ch{} captured {}x{} via callback", channel, width, height);
+            return img;
+        }
+    }
+
+    /**
+     * Runs on the DLL's streaming thread for every frame on every channel —
+     * must stay cheap when no capture is pending.
+     */
+    private static void onRawFrame(int ch, Pointer dataBuf, int width, int height) {
+        if (ch < 0 || ch >= MAX_CHANNELS || dataBuf == null) {
+            return;
+        }
+        CountDownLatch latch = pendingCaptures.get(ch);
+        if (latch == null) {
+            return;
+        }
+        long size = (long) width * height * 2;
+        Memory buf = yuvBuffers[ch];
+        if (buf == null || buf.size() < size) {
+            buf = new Memory(size);
+            yuvBuffers[ch] = buf;
+        }
+        // native-to-native bulk copy, no Java heap involved
+        ByteBuffer src = dataBuf.getByteBuffer(0, size);
+        ByteBuffer dst = buf.getByteBuffer(0, size);
+        dst.put(src);
+        frameWidths[ch] = width;
+        frameHeights[ch] = height;
+        if (pendingCaptures.compareAndSet(ch, latch, null)) {
+            latch.countDown();
+        }
+    }
+
+    /**
+     * Legacy capture path: the DLL writes a BMP to disk which is patched and decoded.
+     * Slow (~40-80 ms plus disk I/O) — only used if the callback delivers no frame.
+     */
+    private BufferedImage captureViaBmp() {
         String path = new File(tempDir, "dvr_ch" + channel + ".bmp").getAbsolutePath();
 
         int ret;
         synchronized (LOCK) {
-            ret = sharedSdk.SaveCaptureImage(channel, path);
+            ret = sharedSdk.SaveCaptureImage(channelHandles[channel], path);
         }
 
         if (ret != 0) {
@@ -112,7 +227,7 @@ public class HwgcDvrCamera extends ReferenceCamera {
                 Logger.warn("HWGC DVR: ch{} ImageIO.read returned null for {} ({} bytes)",
                         channel, path, f.length());
             } else {
-                Logger.trace("HWGC DVR: ch{} captured {}x{}", channel, img.getWidth(), img.getHeight());
+                Logger.trace("HWGC DVR: ch{} captured {}x{} via BMP", channel, img.getWidth(), img.getHeight());
             }
             return img;
         }
@@ -136,12 +251,15 @@ public class HwgcDvrCamera extends ReferenceCamera {
                     return false;
                 }
 
-                // Init with retry — first attempt may fail if called too early
+                // Init with retry — first attempt may fail if called too early.
+                // OEM init order: SetMax_VideoSize -> InitHwDSPs -> VideoChannelOpen
+                // per channel -> RegisterRAWDirectCallback.
                 boolean initialized = false;
                 for (int attempt = 0; attempt < 3; attempt++) {
                     try {
+                        sharedSdk.SetMax_VideoSize(FRAME_WIDTH, FRAME_HEIGHT);
                         sharedSdk.InitHwDSPs();
-                        sharedChannelCount = sharedSdk.GetVideoTotalChannels();
+                        sharedChannelCount = Math.min(sharedSdk.GetVideoTotalChannels(), MAX_CHANNELS);
                         Logger.info("HWGC DVR: initialized, {} channels available",
                                 sharedChannelCount);
 
@@ -149,8 +267,8 @@ public class HwgcDvrCamera extends ReferenceCamera {
                         boolean anySuccess = false;
                         for (int i = 0; i < sharedChannelCount; i++) {
                             try {
-                                sharedSdk.VideoChannelOpen(i);
-                                sharedSdk.StartVideoPreview(i);
+                                channelHandles[i] = sharedSdk.VideoChannelOpen(
+                                        i, FRAME_WIDTH, FRAME_HEIGHT, FRAME_FPS);
                                 anySuccess = true;
                             }
                             catch (Error e) {
@@ -159,6 +277,16 @@ public class HwgcDvrCamera extends ReferenceCamera {
                             }
                         }
                         if (anySuccess) {
+                            if (rawCallback == null) {
+                                rawCallback = new HwgcDvrSdk.RawStreamCallback() {
+                                    @Override
+                                    public void invoke(int ch, Pointer dataBuf, int frameType,
+                                            int width, int height, Pointer context) {
+                                        onRawFrame(ch, dataBuf, width, height);
+                                    }
+                                };
+                            }
+                            sharedSdk.RegisterRAWDirectCallback(rawCallback, Pointer.NULL);
                             initialized = true;
                             break;
                         }
@@ -212,7 +340,7 @@ public class HwgcDvrCamera extends ReferenceCamera {
             if (openCount <= 0 && sharedSdk != null) {
                 for (int i = 0; i < sharedChannelCount; i++) {
                     try {
-                        sharedSdk.StopVideoCapture(i);
+                        sharedSdk.StopVideoCapture(channelHandles[i]);
                     }
                     catch (Error e) {
                         // ignore
