@@ -86,8 +86,15 @@ public class DeltaProtoPanel extends JPanel {
     private static final double DEFAULT_BOARD_Z = -110.000;
     private static final String PREF_KEY_PLACEMENT_RETRIES = "deltaproto.placementRetries";
     private static final int DEFAULT_PLACEMENT_RETRIES = 3;
+    // No machine= parameter: the server derives the machine from the token
+    // (X-Buddy-Token) that ServerLinkConfig.authorize() adds to the request.
     private static final String DEFAULT_ENDPOINT =
-            "https://deltaproto.com/api/openpnp/feeders?machine=Buddy%202";
+            "https://deltaproto.com/api/openpnp/feeders";
+    // This machine was "Buddy 2" before the second machine arrived; it is now
+    // the master "Buddy 2.1" (the slave is "Buddy 2.2").
+    private static final String[] OLD_MACHINE_PARAMS = {"machine=Buddy%202", "machine=Buddy+2",
+            "machine=Buddy 2"};
+    private static final String RENAMED_MACHINE_PARAM = "machine=Buddy%202.1";
     private static final String DEFAULT_JOB_ENDPOINT =
             "https://deltaproto.com/api/openpnp/jobs";
     private static final String DEFAULT_PROJECT_SEARCH_ENDPOINT =
@@ -97,6 +104,21 @@ public class DeltaProtoPanel extends JPanel {
 
     private final JTextField endpointField = new JTextField();
     private final JTextArea logArea = new JTextArea(10, 60);
+
+    // Server link (ServerLink): settings fields + live status in the header.
+    private final JTextField serverUrlField = new JTextField();
+    private final javax.swing.JPasswordField serverTokenField = new javax.swing.JPasswordField();
+    private final JTextField serverInterfaceField = new JTextField(12);
+    private final JTextField serverLanPortField = new JTextField(6);
+    private final JLabel serverStatusLabel = new JLabel(" ");
+
+    // Machine link (master ↔ slave over the LAN) + PCB hand-over.
+    private final JLabel machineLinkLabel = new JLabel(" ");
+    private final JButton linkTestBtn = new JButton("Test communication");
+    private final JButton transferBtn = new JButton("Transfer PCB → slave");
+    private final JTextField transferDelayField = new JTextField(6);
+    private final JTextField transferSpeedField = new JTextField(4);
+    private final JTextField outDelayField = new JTextField(5);
 
     // Job-import UI. Deliberately NOT an editable JComboBox: Swing
     // reconfigures a combo's editor on every model/selection change,
@@ -114,7 +136,10 @@ public class DeltaProtoPanel extends JPanel {
     // Live readout of the loaded job's board location(s), polled because the
     // job (and its BoardLocations) can be replaced wholesale at any time.
     private final JLabel pcbPositionLabel = new JLabel(" ");
-    private final Timer pcbPositionRefresh = new Timer(1000, e -> refreshPcbPosition());
+    private final Timer pcbPositionRefresh = new Timer(1000, e -> {
+        refreshPcbPosition();
+        refreshServerStatus();
+    });
     // True while we set the field text ourselves (accepting a suggestion);
     // the DocumentListener must ignore those events or we'd search again.
     private boolean suppressSearch = false;
@@ -167,6 +192,10 @@ public class DeltaProtoPanel extends JPanel {
         // ── Settings tab ──
         JPanel settingsTab = new JPanel();
         settingsTab.setLayout(new BoxLayout(settingsTab, BoxLayout.Y_AXIS));
+        settingsTab.add(buildServerPanel());
+        settingsTab.add(Box.createVerticalStrut(4));
+        settingsTab.add(buildMachineLinkPanel());
+        settingsTab.add(Box.createVerticalStrut(4));
         settingsTab.add(buildConfigPanel());
         settingsTab.add(Box.createVerticalStrut(4));
         settingsTab.add(buildNewProjectDefaultsPanel());
@@ -178,7 +207,16 @@ public class DeltaProtoPanel extends JPanel {
         // ── Tabbed pane ──
         JTabbedPane tabs = new JTabbedPane();
         tabs.addTab("Main", mainTab);
-        tabs.addTab("Settings", settingsTab);
+        // The settings sections are taller than the tab on the machine's
+        // screen; without a scroll pane the bottom ones are simply cut off.
+        JPanel settingsHolder = new WidthTrackingPanel();
+        settingsHolder.add(settingsTab, BorderLayout.NORTH);
+        JScrollPane settingsScroll = new JScrollPane(settingsHolder,
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+                JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        settingsScroll.setBorder(null);
+        settingsScroll.getVerticalScrollBar().setUnitIncrement(16);
+        tabs.addTab("Settings", settingsScroll);
 
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
@@ -195,6 +233,22 @@ public class DeltaProtoPanel extends JPanel {
 
         refreshPcbPosition();
         pcbPositionRefresh.start();
+
+        // Server link: replay what happened before this panel existed, then
+        // follow it live. Listener callbacks arrive on the link's threads.
+        ServerLink link = ServerLink.get();
+        for (String line : link.getLogBacklog()) {
+            log(line);
+        }
+        link.addListener(new ServerLink.Listener() {
+            @Override public void onChanged() {
+                SwingUtilities.invokeLater(() -> refreshServerStatus());
+            }
+            @Override public void onLog(String line) {
+                SwingUtilities.invokeLater(() -> log(line));
+            }
+        });
+        refreshServerStatus();
     }
 
     // ── UI construction ──
@@ -205,6 +259,7 @@ public class DeltaProtoPanel extends JPanel {
         JLabel title = new JLabel("DeltaProto");
         title.setFont(title.getFont().deriveFont(Font.BOLD, 18f));
         p.add(title);
+        p.add(serverStatusLabel);
         return p;
     }
 
@@ -308,7 +363,7 @@ public class DeltaProtoPanel extends JPanel {
             try {
                 HwgcDriver driver = findHwgcDriver();
                 if (driver != null) {
-                    driver.sendInBoard();
+                    driver.sendInBoard(BoardTransfer.getVelocity());
                     log("Inboard executed.");
                 }
             } catch (Exception ex) {
@@ -323,14 +378,25 @@ public class DeltaProtoPanel extends JPanel {
             try {
                 HwgcDriver driver = findHwgcDriver();
                 if (driver != null) {
-                    driver.sendOutBoard();
-                    log("Outboard executed.");
+                    saveTransferSettings();
+                    int delay = BoardTransfer.getOutDelayTenths();
+                    driver.sendOutBoard(BoardTransfer.getVelocity(), delay);
+                    log("Outboard executed" + (delay > 0
+                            ? " (out-sensor delay " + delay / 10.0 + " s)." : "."));
                 }
             } catch (Exception ex) {
                 log("Outboard failed: " + ex.getMessage());
             }
         });
         p.add(outboardBtn);
+
+        // Hand the board over the conveyor to the slave: the slave confirms it
+        // is ready, then this machine feeds out while the slave feeds in.
+        transferBtn.addActionListener(e -> {
+            saveTransferSettings();
+            ServerLink.get().getBoardTransfer().transferToSlave();
+        });
+        p.add(transferBtn);
 
         return p;
     }
@@ -360,7 +426,7 @@ public class DeltaProtoPanel extends JPanel {
         c.gridx = 1;
         c.weightx = 1;
         c.fill = GridBagConstraints.HORIZONTAL;
-        endpointField.setText(prefs.get(PREF_KEY_ENDPOINT, DEFAULT_ENDPOINT));
+        endpointField.setText(migrateEndpoint(prefs.get(PREF_KEY_ENDPOINT, DEFAULT_ENDPOINT)));
         p.add(endpointField, c);
 
         c.gridx = 2;
@@ -374,6 +440,323 @@ public class DeltaProtoPanel extends JPanel {
         p.add(saveBtn, c);
 
         return p;
+    }
+
+    /**
+     * One-time rename of a stored feeder endpoint that still names this
+     * machine "Buddy 2". Only an exact old name is rewritten ("Buddy 2.1" /
+     * "Buddy 2.2" also start with it and must be left alone).
+     */
+    private String migrateEndpoint(String endpoint) {
+        for (String old : OLD_MACHINE_PARAMS) {
+            int i = endpoint.indexOf(old);
+            if (i < 0) {
+                continue;
+            }
+            int end = i + old.length();
+            if (end == endpoint.length() || endpoint.charAt(end) == '&') {
+                String migrated = endpoint.substring(0, i) + RENAMED_MACHINE_PARAM
+                        + endpoint.substring(end);
+                prefs.put(PREF_KEY_ENDPOINT, migrated);
+                log("Feeder endpoint: machine renamed Buddy 2 → Buddy 2.1.");
+                return migrated;
+            }
+        }
+        return endpoint;
+    }
+
+    /** Settings section for the DeltaProto server link: URL, machine token, LAN. */
+    private JPanel buildServerPanel() {
+        JPanel p = new JPanel(new GridBagLayout());
+        p.setBorder(new TitledBorder("Server (machine token from /dashboard/parts/buddysettings)"));
+
+        ServerLinkConfig cfg = ServerLinkConfig.load();
+        serverUrlField.setText(cfg.baseUrl);
+        serverTokenField.setText(cfg.token);
+        serverInterfaceField.setText(cfg.localIpInterface);
+        serverInterfaceField.setToolTipText(
+                "Optional network interface name; empty = auto-detect the office LAN address");
+        serverLanPortField.setText(Integer.toString(cfg.lanPort));
+        serverLanPortField.setToolTipText(
+                "TCP port of the master ↔ slave LAN link; must be the same on both machines");
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(2, 4, 2, 4);
+        c.fill = GridBagConstraints.HORIZONTAL;
+
+        c.gridy = 0;
+        c.gridx = 0;
+        c.weightx = 0;
+        p.add(new JLabel("Server URL:"), c);
+        c.gridx = 1;
+        c.weightx = 1;
+        c.gridwidth = 3;
+        p.add(serverUrlField, c);
+        c.gridwidth = 1;
+
+        c.gridy = 1;
+        c.gridx = 0;
+        c.weightx = 0;
+        p.add(new JLabel("Machine token:"), c);
+        c.gridx = 1;
+        c.weightx = 1;
+        c.gridwidth = 3;
+        p.add(serverTokenField, c);
+        c.gridwidth = 1;
+
+        c.gridy = 2;
+        c.gridx = 0;
+        c.weightx = 0;
+        p.add(new JLabel("LAN interface:"), c);
+        c.gridx = 1;
+        c.weightx = 1;
+        p.add(serverInterfaceField, c);
+        c.gridx = 2;
+        c.weightx = 0;
+        p.add(new JLabel("LAN port:"), c);
+        c.gridx = 3;
+        p.add(serverLanPortField, c);
+
+        c.gridy = 0;
+        c.gridx = 4;
+        c.gridheight = 2;
+        c.fill = GridBagConstraints.NONE;
+        JButton saveBtn = new JButton("Save & reconnect");
+        saveBtn.addActionListener(e -> {
+            ServerLinkConfig saved = new ServerLinkConfig();
+            saved.baseUrl = serverUrlField.getText().trim().isEmpty()
+                    ? ServerLinkConfig.DEFAULT_BASE_URL : serverUrlField.getText();
+            saved.token = new String(serverTokenField.getPassword());
+            saved.localIpInterface = serverInterfaceField.getText();
+            try {
+                saved.lanPort = Integer.parseInt(serverLanPortField.getText().trim());
+            }
+            catch (Exception ex) {
+                saved.lanPort = ServerLinkConfig.DEFAULT_LAN_PORT;
+                serverLanPortField.setText(Integer.toString(saved.lanPort));
+            }
+            saved.save();
+            // Show the normalised base URL (a pasted wss://…/ws URL is reduced to it).
+            serverUrlField.setText(ServerLinkConfig.load().baseUrl);
+            log("Server settings saved — reconnecting.");
+            ServerLink.get().reconfigure();
+        });
+        p.add(saveBtn, c);
+
+        c.gridy = 2;
+        c.gridheight = 1;
+        JButton refetchBtn = new JButton("Refetch feeders");
+        refetchBtn.setToolTipText("Refetch this machine's feeder config from the server now");
+        refetchBtn.addActionListener(e -> ServerLink.get().refetchFeeders());
+        p.add(refetchBtn, c);
+
+        return p;
+    }
+
+    /**
+     * Settings section showing whether the two Buddy machines can talk to each
+     * other over the LAN, with a round-trip test and the PCB hand-over timing.
+     */
+    private JPanel buildMachineLinkPanel() {
+        JPanel p = new JPanel(new GridBagLayout());
+        p.setBorder(new TitledBorder("Machine link (master ↔ slave over the LAN)"));
+
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(2, 4, 2, 4);
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.anchor = GridBagConstraints.WEST;
+
+        c.gridy = 0;
+        c.gridx = 0;
+        c.gridwidth = 5;
+        c.weightx = 1;
+        p.add(machineLinkLabel, c);
+        c.gridwidth = 1;
+        c.weightx = 0;
+
+        c.gridy = 1;
+        c.gridx = 0;
+        p.add(new JLabel("Slave feed-in delay (ms):"), c);
+        c.gridx = 1;
+        transferDelayField.setText(Integer.toString(BoardTransfer.getFeedInDelayMs()));
+        transferDelayField.setToolTipText("How long after the master's feed out the slave starts"
+                + " its feed in. 0 = both conveyors start together.");
+        p.add(transferDelayField, c);
+        c.gridx = 2;
+        p.add(new JLabel("Track speed step (0-9):"), c);
+        c.gridx = 3;
+        transferSpeedField.setText(Integer.toString(BoardTransfer.getVelocity()));
+        transferSpeedField.setToolTipText("Speed step in the IN_BOARD / OUT_BOARD command."
+                + " 0 = what the HWGC test panel sends.");
+        p.add(transferSpeedField, c);
+
+        c.gridy = 2;
+        c.gridx = 0;
+        c.fill = GridBagConstraints.HORIZONTAL;
+        p.add(new JLabel("Out-sensor stop delay (s):"), c);
+        c.gridx = 1;
+        outDelayField.setText(Double.toString(BoardTransfer.getOutDelayTenths() / 10.0));
+        outDelayField.setToolTipText("Keep the conveyor running this long after the board reaches"
+                + " the out sensor (0.1 s steps, the vendor's \"track delay\"; SmtProgram"
+                + " default 0.5). Used by Outboard and by Transfer PCB.");
+        p.add(outDelayField, c);
+        c.gridy = 1;
+        c.gridx = 4;
+        c.fill = GridBagConstraints.NONE;
+        JButton saveBtn = new JButton("Save");
+        saveBtn.addActionListener(e -> {
+            saveTransferSettings();
+            log("PCB transfer settings saved.");
+        });
+        p.add(saveBtn, c);
+
+        c.gridy = 3;
+        c.gridx = 0;
+        c.gridwidth = 2;
+        linkTestBtn.setToolTipText("Send a test message to the other machine and wait for its"
+                + " answer; the round-trip time is logged");
+        linkTestBtn.addActionListener(e -> {
+            int sent = ServerLink.get().getLanLink().testCommunication();
+            if (sent == 0) {
+                log("! LAN test: no link to the other machine — nothing sent.");
+            }
+        });
+        p.add(linkTestBtn, c);
+
+        return p;
+    }
+
+    private void saveTransferSettings() {
+        try {
+            BoardTransfer.setFeedInDelayMs(Integer.parseInt(transferDelayField.getText().trim()));
+        }
+        catch (Exception ex) {
+            // keep the stored value
+        }
+        try {
+            BoardTransfer.setVelocity(Integer.parseInt(transferSpeedField.getText().trim()));
+        }
+        catch (Exception ex) {
+            // keep the stored value
+        }
+        try {
+            BoardTransfer.setOutDelayTenths((int) Math.round(
+                    Double.parseDouble(outDelayField.getText().trim().replace(',', '.')) * 10));
+        }
+        catch (Exception ex) {
+            // keep the stored value
+        }
+        transferDelayField.setText(Integer.toString(BoardTransfer.getFeedInDelayMs()));
+        transferSpeedField.setText(Integer.toString(BoardTransfer.getVelocity()));
+        outDelayField.setText(Double.toString(BoardTransfer.getOutDelayTenths() / 10.0));
+    }
+
+    private static String dot(boolean ok) {
+        return "<font color='" + (ok ? "#1b7f2a" : "#c62828") + "'>●</font> ";
+    }
+
+    private void refreshMachineLink() {
+        ServerLink link = ServerLink.get();
+        BuddyLanLink lan = link.getLanLink();
+        PeerView me = link.getSelf();
+        boolean linked = lan.isLinked();
+
+        StringBuilder sb = new StringBuilder("<html>");
+        if (me == null) {
+            sb.append("Not connected to the server yet — role and peers unknown.");
+        }
+        else {
+            sb.append("This machine: <b>").append(escape(String.valueOf(me.name)))
+                    .append("</b> · ").append(escape(String.valueOf(me.role))).append("<br>");
+            boolean anyPartner = false;
+            for (PeerView peer : link.getPeers()) {
+                if (!peer.isMaster() && !peer.isSlave()) {
+                    continue;
+                }
+                anyPartner = true;
+                sb.append(dot(Boolean.TRUE.equals(peer.connected)))
+                        .append(escape(String.valueOf(peer.name))).append(" · ")
+                        .append(escape(String.valueOf(peer.role))).append(" · ")
+                        .append(peer.localIp != null ? escape(peer.localIp) : "no LAN address yet")
+                        .append(Boolean.TRUE.equals(peer.connected)
+                                ? " · online at the server" : " · offline at the server")
+                        .append("<br>");
+            }
+            if (!anyPartner) {
+                sb.append("No master/slave partner configured on the server.<br>");
+            }
+            List<String> lines = lan.describe();
+            if (lines.isEmpty()) {
+                sb.append(PeerView.ROLE_STANDALONE.equalsIgnoreCase(me.role)
+                        ? "Standalone: no LAN link." : "LAN link: waiting for the partner's address.");
+            }
+            for (String line : lines) {
+                sb.append(dot(line.endsWith(": linked"))).append("LAN — ").append(escape(line))
+                        .append("<br>");
+            }
+        }
+        sb.append("</html>");
+        String text = sb.toString();
+        if (!text.equals(machineLinkLabel.getText())) {
+            machineLinkLabel.setText(text);
+        }
+        linkTestBtn.setEnabled(linked);
+        transferBtn.setEnabled(linked && lan.isMaster());
+        transferBtn.setToolTipText(!lan.isMaster() ? "Only the master hands boards over"
+                : linked ? "Feed the board out here and in on the slave"
+                        : "No LAN link to the slave (see Settings → Machine link)");
+    }
+
+    /** Header readout of the server link; called on any ServerLink change and once a second. */
+    private void refreshServerStatus() {
+        refreshMachineLink();
+        ServerLink link = ServerLink.get();
+        ServerLink.State state = link.getState();
+        PeerView me = link.getSelf();
+
+        String color;
+        switch (state) {
+            case CONNECTED:
+                color = "#1b7f2a";
+                break;
+            case CONNECTING:
+            case OFFLINE:
+                color = "#9e9e9e";
+                break;
+            default:
+                color = "#c62828";
+                break;
+        }
+        StringBuilder sb = new StringBuilder("<html>");
+        if (me != null && me.name != null) {
+            sb.append("<b>").append(escape(me.name)).append("</b> · ")
+                    .append(escape(String.valueOf(me.role))).append(" &nbsp; ");
+        }
+        sb.append("<font color='").append(color).append("'>●</font> Server: ");
+        if (state == ServerLink.State.CONNECTED) {
+            long s = (System.currentTimeMillis() - link.getConnectedSince()) / 1000;
+            sb.append("connected · ").append(s < 120 ? s + " s" : (s / 60) + " min");
+        }
+        else {
+            sb.append(escape(state.text));
+        }
+        for (String line : link.getLanLink().describe()) {
+            boolean up = line.endsWith(": linked");
+            sb.append(" &nbsp; <font color='").append(up ? "#1b7f2a" : "#c62828")
+                    .append("'>●</font> ").append(escape(line));
+        }
+        sb.append("</html>");
+        String text = sb.toString();
+        if (!text.equals(serverStatusLabel.getText())) {
+            serverStatusLabel.setText(text);
+        }
+        String detail = link.getStateDetail();
+        serverStatusLabel.setToolTipText(detail != null ? detail
+                : (link.getPeers().isEmpty() ? null : "Peers: " + link.getPeers()));
+    }
+
+    private static String escape(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     /** Settings section for the PCB position a freshly imported job starts at. */
@@ -1147,7 +1530,7 @@ public class DeltaProtoPanel extends JPanel {
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
-        HttpRequest request = HttpRequest.newBuilder()
+        HttpRequest request = ServerLinkConfig.authorize(HttpRequest.newBuilder(), url)
                 .uri(URI.create(url))
                 .timeout(Duration.ofSeconds(15))
                 .header("Accept", "application/json")
@@ -1259,6 +1642,29 @@ public class DeltaProtoPanel extends JPanel {
         }
         else {
             log("! Job processor is not ReferencePnpJobProcessor — retry setting not applied.");
+        }
+    }
+
+    /** Scroll pane view that follows the viewport's width and only scrolls vertically. */
+    private static class WidthTrackingPanel extends JPanel implements javax.swing.Scrollable {
+        WidthTrackingPanel() {
+            super(new BorderLayout());
+        }
+
+        @Override public java.awt.Dimension getPreferredScrollableViewportSize() {
+            return getPreferredSize();
+        }
+        @Override public int getScrollableUnitIncrement(java.awt.Rectangle r, int o, int d) {
+            return 16;
+        }
+        @Override public int getScrollableBlockIncrement(java.awt.Rectangle r, int o, int d) {
+            return Math.max(16, r.height - 16);
+        }
+        @Override public boolean getScrollableTracksViewportWidth() {
+            return true;
+        }
+        @Override public boolean getScrollableTracksViewportHeight() {
+            return false;
         }
     }
 

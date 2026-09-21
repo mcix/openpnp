@@ -118,6 +118,93 @@ public class DeltaProtoFeederImporter {
     }
 
     static ImportResult apply(Machine machine, Payload payload, FeederLayout layout) throws Exception {
+        return apply(machine, payload, layout, java.util.Collections.emptySet());
+    }
+
+    /** One feeder lane that an import would change. */
+    static class LaneChange {
+        enum Kind { CREATE, UPDATE, REMOVE }
+
+        final int slot;
+        final Kind kind;
+        final String oldPartId;
+        final String newPartId;
+
+        LaneChange(int slot, Kind kind, String oldPartId, String newPartId) {
+            this.slot = slot;
+            this.kind = kind;
+            this.oldPartId = oldPartId;
+            this.newPartId = newPartId;
+        }
+
+        @Override
+        public String toString() {
+            switch (kind) {
+                case CREATE:
+                    return "lane " + slot + ": new, " + newPartId;
+                case REMOVE:
+                    return "lane " + slot + ": cleared (was " + oldPartId + ")";
+                default:
+                    return "lane " + slot + ": " + oldPartId + " → " + newPartId;
+            }
+        }
+    }
+
+    /**
+     * The lanes {@link #apply} would create, re-part or remove for this
+     * payload, without touching anything. Lanes whose part stays the same are
+     * not reported. Lets the server link log what changed and decide what is
+     * safe to apply while a job is running.
+     */
+    static List<LaneChange> diff(Machine machine, Payload payload) {
+        List<LaneChange> changes = new ArrayList<>();
+        if (payload == null) {
+            return changes;
+        }
+        Map<Integer, HwgcFeeder> bySlot = new HashMap<>();
+        for (Feeder f : machine.getFeeders()) {
+            if (f instanceof HwgcFeeder) {
+                bySlot.put(((HwgcFeeder) f).getFeederNumber(), (HwgcFeeder) f);
+            }
+        }
+        java.util.Set<Integer> incoming = new java.util.HashSet<>();
+        if (payload.feeders != null) {
+            for (FeederDto dto : payload.feeders) {
+                if (dto.slotIndex == null) {
+                    continue;
+                }
+                incoming.add(dto.slotIndex);
+                HwgcFeeder hf = bySlot.get(dto.slotIndex);
+                if (hf == null) {
+                    changes.add(new LaneChange(dto.slotIndex, LaneChange.Kind.CREATE,
+                            null, dto.partId));
+                    continue;
+                }
+                String oldId = hf.getPart() != null ? hf.getPart().getId() : null;
+                if (!java.util.Objects.equals(oldId, dto.partId) || !hf.isEnabled()) {
+                    changes.add(new LaneChange(dto.slotIndex, LaneChange.Kind.UPDATE,
+                            oldId, dto.partId));
+                }
+            }
+        }
+        for (Map.Entry<Integer, HwgcFeeder> e : bySlot.entrySet()) {
+            if (!incoming.contains(e.getKey())) {
+                Part p = e.getValue().getPart();
+                changes.add(new LaneChange(e.getKey(), LaneChange.Kind.REMOVE,
+                        p != null ? p.getId() : null, null));
+            }
+        }
+        changes.sort(java.util.Comparator.comparingInt(c -> c.slot));
+        return changes;
+    }
+
+    /**
+     * @param deferredSlots lanes to leave exactly as they are (not created,
+     *        re-parted or removed) — used while a job is running; a later
+     *        apply with an empty set catches them up.
+     */
+    static ImportResult apply(Machine machine, Payload payload, FeederLayout layout,
+            java.util.Set<Integer> deferredSlots) throws Exception {
         ImportResult result = new ImportResult();
         Configuration config = Configuration.get();
 
@@ -237,6 +324,9 @@ public class DeltaProtoFeederImporter {
                     continue;
                 }
                 incomingSlots.add(dto.slotIndex);
+                if (deferredSlots.contains(dto.slotIndex)) {
+                    continue;
+                }
 
                 Part part = dto.partId != null ? config.getPart(dto.partId) : null;
                 if (dto.partId != null && part == null) {
@@ -283,7 +373,8 @@ public class DeltaProtoFeederImporter {
 
         // Remove: any existing HwgcFeeder whose slot is no longer in the payload.
         for (Map.Entry<Integer, HwgcFeeder> entry : bySlot.entrySet()) {
-            if (!incomingSlots.contains(entry.getKey())) {
+            if (!incomingSlots.contains(entry.getKey())
+                    && !deferredSlots.contains(entry.getKey())) {
                 machine.removeFeeder(entry.getValue());
                 result.feedersRemoved++;
                 result.warnings.add("Removed HwgcFeeder for slot " + entry.getKey()
@@ -300,7 +391,9 @@ public class DeltaProtoFeederImporter {
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
-        HttpRequest request = HttpRequest.newBuilder()
+        // The machine token lets the server derive the machine, so the
+        // endpoint no longer needs a machine= parameter.
+        HttpRequest request = ServerLinkConfig.authorize(HttpRequest.newBuilder(), endpointUrl)
                 .uri(URI.create(endpointUrl))
                 .timeout(Duration.ofSeconds(30))
                 .header("Accept", "application/json")

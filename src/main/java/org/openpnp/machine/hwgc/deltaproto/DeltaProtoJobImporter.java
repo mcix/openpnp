@@ -90,7 +90,7 @@ public class DeltaProtoJobImporter {
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
-        HttpRequest request = HttpRequest.newBuilder()
+        HttpRequest request = ServerLinkConfig.authorize(HttpRequest.newBuilder(), url)
                 .uri(URI.create(url))
                 .timeout(Duration.ofSeconds(30))
                 .header("Accept", "application/json")
