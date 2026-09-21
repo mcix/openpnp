@@ -11,6 +11,8 @@
  */
 package org.openpnp.machine.hwgc.deltaproto;
 
+import java.awt.Frame;
+
 import javax.swing.JTabbedPane;
 
 import org.openpnp.gui.MainFrame;
@@ -42,6 +44,13 @@ public final class DeltaProtoIntegration {
         }
         catch (Throwable t) {
             Logger.error(t, "Failed to install DeltaProto tab");
+        }
+        // The machine PC is a dedicated operator station: always start maximized.
+        try {
+            mainFrame.setExtendedState(mainFrame.getExtendedState() | Frame.MAXIMIZED_BOTH);
+        }
+        catch (Throwable t) {
+            Logger.error(t, "Failed to maximize main window");
         }
         // Ask the operator to connect and home the machine once the window is up.
         StartupMachinePrompt.schedule(mainFrame);
