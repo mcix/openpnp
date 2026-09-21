@@ -1028,6 +1028,19 @@ public class HwgcDriver extends AbstractReferenceDriver {
     }
 
     // Board handling
+    //
+    // Byte layout from the vendor library (QnConnectionClass.sendInBoard /
+    // sendOutBoard) and identical to what the HWGC test panel sends:
+    //   IN_BOARD  0x30: [0, 0, boardNo, v,      section, 10 - psd, 0x30]
+    //   OUT_BOARD 0x31: [0, 0, boardNo, useBTC, delay,   10 - psd, 0x31]
+    // psd is the track speed step (0-9). Byte 5 must never be 0: an earlier
+    // version left it 0 and put a speed in byte 3, which is the useBTC flag for
+    // OUT_BOARD — the controller then ignored the out-board command.
+
+    /** Track speed step the HWGC test panel uses (byte 5 = 10). */
+    public static final int BOARD_PSD_DEFAULT = 0;
+    /** IN_BOARD "v" byte the HWGC test panel uses. */
+    public static final int IN_BOARD_V_DEFAULT = 7;
 
     /**
      * Load and clamp the board via the IN_BOARD (0x30) opcode. The firmware
@@ -1037,17 +1050,20 @@ public class HwgcDriver extends AbstractReferenceDriver {
      * the DeltaProto panel.
      */
     public void sendInBoard() throws Exception {
-        sendInBoard(2);
+        sendInBoard(BOARD_PSD_DEFAULT);
     }
 
     /**
      * Load a board onto the conveyor via IN_BOARD (0x30).
-     * @param velocity conveyor speed (1-9, default in SmtProgram is 7)
+     * @param psd track speed step 0-9 (0 = what the HWGC test panel sends)
      */
-    public void sendInBoard(int velocity) throws Exception {
+    public void sendInBoard(int psd) throws Exception {
         byte[] cmd = new byte[CMD_PACKET_LEN];
         cmd[CMD_BYTE_INDEX] = (byte) IN_BOARD;
-        cmd[3] = (byte) velocity;
+        cmd[2] = 0; // board / conveyor number
+        cmd[3] = (byte) IN_BOARD_V_DEFAULT;
+        cmd[4] = 0; // section
+        cmd[5] = (byte) (10 - clampPsd(psd));
         sendCommand(cmd);
     }
 
@@ -1056,18 +1072,28 @@ public class HwgcDriver extends AbstractReferenceDriver {
      * opcode.
      */
     public void sendOutBoard() throws Exception {
-        sendOutBoard(2);
+        sendOutBoard(BOARD_PSD_DEFAULT, 0);
     }
 
     /**
      * Unload a board from the conveyor via OUT_BOARD (0x31).
-     * @param velocity conveyor speed (1-9, default in SmtProgram is 7)
+     * @param psd track speed step 0-9 (0 = what the HWGC test panel sends)
+     * @param delayTenths the vendor's "track delay" in 0.1 s units (SmtProgram
+     *        sends mTrackDelay * 10, default 5): how long the conveyor keeps
+     *        running after the board reaches the out sensor. 0 = stop at once.
      */
-    public void sendOutBoard(int velocity) throws Exception {
+    public void sendOutBoard(int psd, int delayTenths) throws Exception {
         byte[] cmd = new byte[CMD_PACKET_LEN];
         cmd[CMD_BYTE_INDEX] = (byte) OUT_BOARD;
-        cmd[3] = (byte) velocity;
+        cmd[2] = 0; // board / conveyor number
+        cmd[3] = 0; // useBTC
+        cmd[4] = (byte) Math.max(0, Math.min(255, delayTenths));
+        cmd[5] = (byte) (10 - clampPsd(psd));
         sendCommand(cmd);
+    }
+
+    private static int clampPsd(int psd) {
+        return Math.max(0, Math.min(9, psd));
     }
 
     private void sendBoardClamp(boolean clamp) throws Exception {
