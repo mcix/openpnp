@@ -23,7 +23,8 @@ public final class DeltaProtoIntegration {
     private DeltaProtoIntegration() {}
 
     /**
-     * Adds the DeltaProto control tab to the given {@link MainFrame}. Safe to
+     * Adds the DeltaProto control tab to the given {@link MainFrame} and schedules
+     * the startup connect/home prompt ({@link StartupMachinePrompt}). Safe to
      * call multiple times — subsequent calls are no-ops. Any failure is logged
      * and swallowed so a broken DeltaProto integration cannot prevent OpenPNP
      * from starting.
@@ -42,5 +43,7 @@ public final class DeltaProtoIntegration {
         catch (Throwable t) {
             Logger.error(t, "Failed to install DeltaProto tab");
         }
+        // Ask the operator to connect and home the machine once the window is up.
+        StartupMachinePrompt.schedule(mainFrame);
     }
 }
