@@ -122,7 +122,7 @@ public class ControlPanelSchematic extends JComponent {
         g.fill(head);
     }
 
-    private static void drawCallout(Graphics2D g, int fromX, int fromY, int textX, int textY,
+    static void drawCallout(Graphics2D g, int fromX, int fromY, int textX, int textY,
             String line1, String line2) {
         g.setColor(CALLOUT);
         g.setStroke(new BasicStroke(1.8f));
@@ -139,7 +139,7 @@ public class ControlPanelSchematic extends JComponent {
         g.drawString(line2, textX, textY + 16);
     }
 
-    private static void drawCentered(Graphics2D g, String s, int cx, int y) {
+    static void drawCentered(Graphics2D g, String s, int cx, int y) {
         FontMetrics fm = g.getFontMetrics();
         g.drawString(s, cx - fm.stringWidth(s) / 2, y);
     }
