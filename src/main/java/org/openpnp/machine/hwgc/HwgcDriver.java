@@ -569,17 +569,19 @@ public class HwgcDriver extends AbstractReferenceDriver {
 
         connected = false;
 
-        // Read firmware version to verify communication
-        write(READ_VERSION);
-        byte[] version = readResponse(timeoutMilliseconds, -1);
-        if (version != null && version.length >= RTN_PACKET_LEN) {
-            Logger.info("HWGC firmware version: {} {} {} {} {}",
-                    String.format("%02X", version[0] & 0xFF),
-                    String.format("%02X", version[1] & 0xFF),
-                    String.format("%02X", version[2] & 0xFF),
-                    String.format("%02X", version[3] & 0xFF),
-                    String.format("%02X", version[4] & 0xFF));
+        // Read firmware version to verify communication. A controller that does not
+        // answer means the machine is powered off or the emergency stop is pressed.
+        byte[] version = readVersionWithTimeout(POWER_CHECK_TIMEOUT_MS);
+        if (version == null) {
+            Logger.warn("HWGC: controller did not answer the version query — machine is off");
+            throw new MachineNotPoweredException();
         }
+        Logger.info("HWGC firmware version: {} {} {} {} {}",
+                String.format("%02X", version[0] & 0xFF),
+                String.format("%02X", version[1] & 0xFF),
+                String.format("%02X", version[2] & 0xFF),
+                String.format("%02X", version[3] & 0xFF),
+                String.format("%02X", version[4] & 0xFF));
 
         // Set travel limits — required before coordinate moves work
         sendMaxXYDistance(maxX, maxY);
@@ -587,6 +589,84 @@ public class HwgcDriver extends AbstractReferenceDriver {
 
         connected = true;
         Logger.info("HWGC driver connected");
+    }
+
+    /** How long the controller gets to answer the version query before it counts as off. */
+    private static final int POWER_CHECK_TIMEOUT_MS = 1500;
+
+    /**
+     * Thrown by connect() when the controller does not answer: the machine is switched
+     * off or the emergency stop is pressed (the E-stop cuts power to the controller).
+     */
+    public static class MachineNotPoweredException extends Exception {
+        public static final String MESSAGE = "The machine is not ON.\n\n"
+                + "Turn on the machine, or twist the emergency stop button to release it, "
+                + "then connect again.";
+
+        public MachineNotPoweredException() {
+            super(MESSAGE);
+        }
+    }
+
+    /**
+     * Sends READ_VERSION on the open port and waits for the answer. The serial read blocks
+     * until a byte arrives, so the query runs on a helper thread; when the controller stays
+     * silent the port is closed, which unblocks the read. Returns null and leaves the port
+     * closed when there is no answer.
+     */
+    private byte[] readVersionWithTimeout(int timeoutMs) throws Exception {
+        final byte[][] result = new byte[1][];
+        Thread reader = new Thread(() -> {
+            try {
+                write(READ_VERSION);
+                result[0] = readResponse(timeoutMs, -1);
+            }
+            catch (Exception e) {
+                // Port closed underneath us, or I/O error — treated as no answer
+            }
+        }, "hwgc-version-query");
+        reader.setDaemon(true);
+        reader.start();
+        reader.join(timeoutMs + 500);
+        if (result[0] == null) {
+            try {
+                getCommunications().disconnect();
+            }
+            catch (Exception e) {
+                Logger.debug("HWGC: disconnect after silent controller failed: {}", e.getMessage());
+            }
+            reader.join(1000);
+        }
+        return result[0];
+    }
+
+    /**
+     * Checks whether the controller answers, i.e. the machine is switched on and the
+     * emergency stop is released. Safe to call while disconnected: it opens the port,
+     * sends the read-only version query and closes the port again. Never moves anything.
+     */
+    public synchronized boolean isMachinePowered() {
+        if (connected) {
+            return true;
+        }
+        try {
+            getCommunications().setDriverName(getName());
+            getCommunications().connect();
+            byte[] version = readVersionWithTimeout(POWER_CHECK_TIMEOUT_MS);
+            return version != null;
+        }
+        catch (Exception e) {
+            Logger.debug("HWGC: power check failed: {}", e.getMessage());
+            return false;
+        }
+        finally {
+            try {
+                getCommunications().disconnect();
+            }
+            catch (Exception e) {
+                // ignore
+            }
+        }
     }
 
     @Override
