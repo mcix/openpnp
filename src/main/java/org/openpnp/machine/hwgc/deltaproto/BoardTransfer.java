@@ -34,7 +34,15 @@ import com.google.gson.JsonObject;
 
 public final class BoardTransfer implements BuddyLanLink.FrameHandler {
 
-    static final String PREF_KEY_FEED_IN_DELAY_MS = "transfer.feedInDelayMs";
+    // New key: the first version stored 0 ms under "transfer.feedInDelayMs" on every
+    // transfer, which would mask the 3 s default below.
+    static final String PREF_KEY_FEED_IN_DELAY_MS = "transfer.slaveFeedInDelayMs";
+    /**
+     * IN_BOARD only catches a board that is about to reach the slave's entry
+     * sensor; sent at the same moment as the master's OUT_BOARD it gives up
+     * before the board has crossed over.
+     */
+    static final int DEFAULT_FEED_IN_DELAY_MS = 3000;
     static final String PREF_KEY_VELOCITY = "transfer.psd";
     static final String PREF_KEY_OUT_DELAY_TENTHS = "transfer.outDelayTenths";
     /** Same track speed step the manual Inboard/Outboard buttons and the HWGC test panel use. */
@@ -64,8 +72,13 @@ public final class BoardTransfer implements BuddyLanLink.FrameHandler {
         lanLink.setFrameHandler(this);
     }
 
+    /**
+     * How long after the master's OUT_BOARD the slave sends its IN_BOARD.
+     * Independent of the master's out-sensor stop delay, so the two conveyors
+     * can overlap: the master keeps running while the slave already pulls.
+     */
     public static int getFeedInDelayMs() {
-        return Math.max(0, PREFS.getInt(PREF_KEY_FEED_IN_DELAY_MS, 0));
+        return Math.max(0, PREFS.getInt(PREF_KEY_FEED_IN_DELAY_MS, DEFAULT_FEED_IN_DELAY_MS));
     }
 
     public static void setFeedInDelayMs(int ms) {
@@ -122,8 +135,9 @@ public final class BoardTransfer implements BuddyLanLink.FrameHandler {
             }
             pendingId = id;
             pendingVelocity = velocity;
-            log.accept("PCB transfer " + id + ": asked the slave to feed in (delay " + delayMs
-                    + " ms, speed " + velocity + ") — waiting for its confirmation.");
+            log.accept("PCB transfer " + id + ": asked the slave to feed in " + delayMs / 1000.0
+                    + " s after the feed out (speed step " + velocity
+                    + ") — waiting for its confirmation.");
             pendingTimeout = exec.schedule(() -> {
                 if (id.equals(pendingId)) {
                     pendingId = null;

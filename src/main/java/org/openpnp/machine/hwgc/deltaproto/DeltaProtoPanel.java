@@ -576,11 +576,12 @@ public class DeltaProtoPanel extends JPanel {
 
         c.gridy = 1;
         c.gridx = 0;
-        p.add(new JLabel("Slave feed-in delay (ms):"), c);
+        p.add(new JLabel("Slave feed-in delay (s):"), c);
         c.gridx = 1;
-        transferDelayField.setText(Integer.toString(BoardTransfer.getFeedInDelayMs()));
-        transferDelayField.setToolTipText("How long after the master's feed out the slave starts"
-                + " its feed in. 0 = both conveyors start together.");
+        transferDelayField.setText(Double.toString(BoardTransfer.getFeedInDelayMs() / 1000.0));
+        transferDelayField.setToolTipText("How long after the master's feed out the slave sends"
+                + " its feed in. Keep it shorter than the out-sensor stop delay so both"
+                + " conveyors run while the board crosses over.");
         p.add(transferDelayField, c);
         c.gridx = 2;
         p.add(new JLabel("Track speed step (0-9):"), c);
@@ -628,7 +629,8 @@ public class DeltaProtoPanel extends JPanel {
 
     private void saveTransferSettings() {
         try {
-            BoardTransfer.setFeedInDelayMs(Integer.parseInt(transferDelayField.getText().trim()));
+            BoardTransfer.setFeedInDelayMs((int) Math.round(Double.parseDouble(
+                    transferDelayField.getText().trim().replace(',', '.')) * 1000));
         }
         catch (Exception ex) {
             // keep the stored value
@@ -646,7 +648,7 @@ public class DeltaProtoPanel extends JPanel {
         catch (Exception ex) {
             // keep the stored value
         }
-        transferDelayField.setText(Integer.toString(BoardTransfer.getFeedInDelayMs()));
+        transferDelayField.setText(Double.toString(BoardTransfer.getFeedInDelayMs() / 1000.0));
         transferSpeedField.setText(Integer.toString(BoardTransfer.getVelocity()));
         outDelayField.setText(Double.toString(BoardTransfer.getOutDelayTenths() / 10.0));
     }
