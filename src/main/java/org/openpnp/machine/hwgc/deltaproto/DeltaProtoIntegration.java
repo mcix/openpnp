@@ -45,6 +45,13 @@ public final class DeltaProtoIntegration {
         catch (Throwable t) {
             Logger.error(t, "Failed to install DeltaProto tab");
         }
+        // Ask to clamp the PCB before aligning it or starting/resuming a job.
+        try {
+            ClampGuard.install(mainFrame);
+        }
+        catch (Throwable t) {
+            Logger.error(t, "Failed to install DeltaProto clamp guard");
+        }
         // Keep the websocket to the DeltaProto server open (feeder change events,
         // LAN address publishing, master/slave peer table). Idle without a token.
         try {

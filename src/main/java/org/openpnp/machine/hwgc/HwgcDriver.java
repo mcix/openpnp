@@ -588,6 +588,7 @@ public class HwgcDriver extends AbstractReferenceDriver {
         sendMaxZDistance(maxZ);
 
         connected = true;
+        boardClamped = false; // unknown after a (re)connect
         Logger.info("HWGC driver connected");
     }
 
@@ -1065,6 +1066,8 @@ public class HwgcDriver extends AbstractReferenceDriver {
         cmd[4] = 0; // section
         cmd[5] = (byte) (10 - clampPsd(psd));
         sendCommand(cmd);
+        // The firmware clamps by itself once the board reaches the middle sensor.
+        boardClamped = true;
     }
 
     /**
@@ -1090,7 +1093,20 @@ public class HwgcDriver extends AbstractReferenceDriver {
         cmd[4] = (byte) Math.max(0, Math.min(255, delayTenths));
         cmd[5] = (byte) (10 - clampPsd(psd));
         sendCommand(cmd);
+        boardClamped = false;
     }
+
+    /**
+     * Whether the board clamp is engaged, as far as this driver knows. The
+     * controller gives no verified clamp feedback on HW_4SG_50, so this is
+     * tracked from the commands sent (Clamp / Unclamp / InBoard / OutBoard)
+     * and is false after every (re)connect, when the state is unknown.
+     */
+    public boolean isBoardClamped() {
+        return connected && boardClamped;
+    }
+
+    private volatile boolean boardClamped = false;
 
     private static int clampPsd(int psd) {
         return Math.max(0, Math.min(9, psd));
@@ -1114,6 +1130,7 @@ public class HwgcDriver extends AbstractReferenceDriver {
         cmd[4] = (byte) boardNo;
         cmd[5] = (byte) (clamp ? 1 : 0);
         sendCommand(cmd);
+        boardClamped = clamp;
     }
 
     /**
